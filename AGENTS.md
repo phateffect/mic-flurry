@@ -99,11 +99,39 @@ official Homebrew Cask are deferred until Developer ID signing and notarization 
 Use `INSTALL.md` for agent-driven installation and diagnosis. Prefer a reboot for a user-facing
 installer; `sudo killall coreaudiod` is the faster development path.
 
+## Sandboxed agent workflow
+
+- Do not repeatedly invoke plain `sudo` from a non-interactive agent shell. For an installation or
+  `coreaudiod` restart explicitly requested by the user, use the native macOS administrator prompt
+  (for example, AppleScript `do shell script ... with administrator privileges`) and keep the exact
+  target limited to MicFlurry. An authorization prompt does not waive the safety rules above.
+- Repo builds and Rust tests must write inside the repository. Compiler/module caches that tools
+  insist on placing outside the workspace must use a MicFlurry-specific directory under `/tmp`;
+  never redirect a broad home directory or shared system cache.
+- Use `mise run verify-asr` instead of invoking the Swift verifier directly. It puts Swift and Clang
+  module caches under `/tmp`. CoreAudio device access can still require running this task in the
+  host context because a filesystem-writable sandbox may expose an empty HAL device list.
+- Use `mise run micflurry -- <arguments>` for agent smoke tests. Its default SQLite database is
+  `/tmp/micflurry-dev.db`; pass a later `--database PATH` to override it. Do not use the production
+  database in `~/Library/Application Support` for automated tests.
+- Treat filesystem access, host-service access, and administrator authorization as separate
+  concerns. `/tmp` solves cache/state writes only; it does not grant CoreAudio, Bluetooth,
+  Accessibility, HAL installation, or service-restart privileges.
+
 ## Roadmap boundaries
 
 - The current Milestone 1 topology exposes a visible input-only `MicFlurry` backed by a hidden
   output-only `MicFlurry Internal` mirror device.
-- v0.3 may add remote/GATT receive, decoding, and userspace resampling before CoreAudio output.
+- Milestone 2 adds a foreground Rust process composed of `micflurry-control`, `micflurry-core`, and
+  `micflurry-tui`. Runtime logic stays independent of Ratatui and is reached through
+  `LocalControlClient`; do not add a daemon or socket before Milestone 3.
+- The first predefined BLE profile is Google ATVV v1. Audio notifications are high-nibble-first IMA
+  ADPCM at 8 or 16 kHz and are resampled in userspace before standard CoreAudio output to
+  `MicFlurry_2_UID`.
+- Runtime settings, known devices, and recording metadata live in SQLite. Optional recordings are
+  mono Float32 WAV files. Clients must use the control abstraction rather than opening SQLite.
+- Additional GATT profiles may be added behind the same runtime/control boundaries after ATVV
+  hardware validation; do not couple profile-specific code to the TUI.
 
 Do not begin BLE/GATT or custom driver IPC work unless the user explicitly advances the roadmap.
 

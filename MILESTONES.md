@@ -190,7 +190,7 @@ identifiers together when the restructuring starts.
 - Keep both endpoints mono and validate the existing supported sample rates and ASR conversion path.
 - Migrate component identifiers together if this milestone is selected for the naming transition.
 
-### Milestone 2 — foreground Rust vertical slice
+### Milestone 2 — foreground Rust vertical slice (implemented; hardware validation pending)
 
 - Add the Rust workspace and keep runtime logic independent of Ratatui.
 - Initially run the runtime and TUI in one foreground process using a `LocalControlClient` backed by
@@ -202,6 +202,12 @@ identifiers together when the restructuring starts.
 - Show pairing, connection, audio, recording, and error status in the TUI.
 
 This milestone proves the complete audio path before adding process lifecycle and IPC complexity.
+
+The foreground workspace, local control abstraction, ATVV v1 implementation, CoreAudio writer,
+CGEvent actions, SQLite persistence, WAV recording, and Ratatui status UI are implemented. Automated
+tests cover protocol parsing/decoding, resampling, persistence, and the in-process client. A physical
+ATVV remote and an installed driver are still required to complete the device-level validation in
+`docs/milestone-2.md`; this repository does not claim that hardware validation from automated tests.
 
 ### Milestone 3 — independent daemon and public local API
 

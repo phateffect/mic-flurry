@@ -177,10 +177,39 @@ longer applies, refresh only `patches/mic-flurry.patch`; do not edit the submodu
 
 - Milestone 0: visible input + output loopback baseline
 - Milestone 1: visible input-only device backed by a hidden output-only mirror device (complete)
-- Milestone 2: foreground Rust Bluetooth-to-CoreAudio vertical slice
+- Milestone 2: foreground Rust Bluetooth-to-CoreAudio vertical slice (implemented; physical ATVV
+  remote validation remains)
 
 The component boundaries, daemon/control API design, persistence decisions, and staged delivery plan
 are documented in [MILESTONES.md](MILESTONES.md).
+
+## Foreground Rust prototype
+
+Milestone 2 adds a Rust workspace with UI-independent control and runtime crates plus a Ratatui
+foreground client. It discovers BLE remotes, connects through CoreBluetooth (which triggers macOS
+pairing when the remote requires it), negotiates the Google ATVV v1 GATT profile, decodes its IMA
+ADPCM stream, resamples 8 or 16 kHz speech to the configured driver rate, and writes mono `Float32`
+to `MicFlurry_2_UID` through AUHAL.
+
+Install the pinned toolchain and verify the workspace:
+
+```bash
+mise install
+mise run rust-check
+```
+
+Install and activate the MicFlurry driver as described above, allow Bluetooth access for the
+terminal application under System Settings → Privacy & Security → Bluetooth, then run:
+
+```bash
+mise run micflurry
+```
+
+The terminal also needs Accessibility permission before CGEvent keyboard actions work. The runtime
+does not install the driver, restart CoreAudio, or change either permission itself. Use `s` to scan,
+the arrow keys and Return to pair/connect, `r` to record, and `q` to quit. The complete controls,
+state paths, protocol behavior, and hardware checklist are in
+[docs/milestone-2.md](docs/milestone-2.md).
 
 ## License
 

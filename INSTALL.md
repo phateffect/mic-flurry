@@ -13,6 +13,9 @@ the GitHub Release package for user-like testing. Use a source build only for dr
   package, use the macOS **Privacy & Security → Open Anyway** flow.
 - Do not delete or replace another audio driver. The only installation target in scope is
   `/Library/Audio/Plug-Ins/HAL/MicFlurry.driver`.
+- In a non-interactive agent shell, do not retry plain `sudo`. After explicit user authorization,
+  use the native macOS administrator prompt for the narrowly scoped install or CoreAudio restart.
+  This is still a privileged operation and must not be folded into an ordinary build or test task.
 
 ## Install a GitHub Release
 
@@ -127,7 +130,7 @@ After installing the current source candidate with explicit user authorization, 
 Then verify the common ASR client format:
 
 ```bash
-./scripts/verify-asr-format.swift
+mise run verify-asr
 ```
 
 This resolves both endpoints by UID, checks their visibility and channel topology, and asks AUHAL
@@ -135,6 +138,11 @@ to initialize `MicFlurry Internal` as the producer and `MicFlurry` as the consum
 16-bit little-endian PCM, mono, 16 kHz while the driver remains at its current native rate. The
 driver keeps its native Float32 buffer; CoreAudio performs the application-boundary format
 conversion.
+
+The mise task stores Swift and Clang module caches under `/tmp`, which avoids writes to sandboxed
+user cache directories. If it reports that neither endpoint is present while host applications can
+see MicFlurry, rerun the same task with host-service access; a writable filesystem sandbox can still
+hide the CoreAudio HAL device list.
 
 ## Troubleshooting a missing device
 
