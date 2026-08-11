@@ -182,7 +182,7 @@ identifiers together when the restructuring starts.
 - Support 8, 16, 44.1, and 48 kHz, including the 16 kHz mono SInt16 ASR client boundary.
 - Ship the unsigned development package used by trusted testers.
 
-### Milestone 1 — polished driver injection topology
+### Milestone 1 — polished driver injection topology (complete)
 
 - Expose a visible input-only `MicFlurry` device.
 - Add a hidden output-only `MicFlurry Internal` mirror backed by the same driver buffer.

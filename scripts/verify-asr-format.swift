@@ -4,7 +4,8 @@ import AudioToolbox
 import CoreAudio
 import Foundation
 
-private let deviceUID = "MicFlurry_UID"
+private let inputDeviceUID = "MicFlurry_UID"
+private let injectionDeviceUID = "MicFlurry_2_UID"
 private let asrSampleRate = 16_000.0
 
 private func describe(_ status: OSStatus) -> String {
@@ -45,58 +46,75 @@ private func propertyData<T>(
     return value
 }
 
-private func findMicFlurry() throws -> AudioDeviceID {
+private func findDevice(uid: String) throws -> AudioDeviceID {
     var address = AudioObjectPropertyAddress(
-        mSelector: kAudioHardwarePropertyDevices,
+        mSelector: kAudioHardwarePropertyTranslateUIDToDevice,
         mScope: kAudioObjectPropertyScopeGlobal,
         mElement: kAudioObjectPropertyElementMain
     )
-    var size: UInt32 = 0
-    try check(
-        AudioObjectGetPropertyDataSize(AudioObjectID(kAudioObjectSystemObject), &address, 0, nil, &size),
-        "list audio devices"
-    )
-
-    let count = Int(size) / MemoryLayout<AudioDeviceID>.size
-    var devices = Array(repeating: AudioDeviceID(0), count: count)
-    try check(
+    var qualifier = uid as CFString
+    var device = AudioDeviceID(kAudioObjectUnknown)
+    var size = UInt32(MemoryLayout<AudioDeviceID>.size)
+    let status = withUnsafePointer(to: &qualifier) { qualifierPointer in
         AudioObjectGetPropertyData(
-            AudioObjectID(kAudioObjectSystemObject), &address, 0, nil, &size, &devices
-        ),
-        "read audio device list"
-    )
-
-    for device in devices {
-        var uidAddress = AudioObjectPropertyAddress(
-            mSelector: kAudioDevicePropertyDeviceUID,
-            mScope: kAudioObjectPropertyScopeGlobal,
-            mElement: kAudioObjectPropertyElementMain
+            AudioObjectID(kAudioObjectSystemObject),
+            &address,
+            UInt32(MemoryLayout<CFString>.size),
+            qualifierPointer,
+            &size,
+            &device
         )
-        let uid: CFString = try propertyData(
-            objectID: device,
-            address: &uidAddress,
-            initialValue: "" as CFString
-        )
-        if uid as String == deviceUID {
-            return device
-        }
     }
-
-    throw NSError(
-        domain: "MicFlurryASRVerification",
-        code: 1,
-        userInfo: [NSLocalizedDescriptionKey: "MicFlurry is not loaded; install it and restart CoreAudio"]
-    )
+    try check(status, "resolve CoreAudio device UID \(uid)")
+    guard device != kAudioObjectUnknown else {
+        throw NSError(
+            domain: "MicFlurryASRVerification",
+            code: 1,
+            userInfo: [
+                NSLocalizedDescriptionKey:
+                    "CoreAudio device \(uid) is not loaded; install MicFlurry and restart CoreAudio"
+            ]
+        )
+    }
+    return device
 }
 
-private func inputChannelCount(_ device: AudioDeviceID) throws -> UInt32 {
+private func deviceName(_ device: AudioDeviceID) throws -> String {
+    var address = AudioObjectPropertyAddress(
+        mSelector: kAudioObjectPropertyName,
+        mScope: kAudioObjectPropertyScopeGlobal,
+        mElement: kAudioObjectPropertyElementMain
+    )
+    let name: CFString = try propertyData(
+        objectID: device,
+        address: &address,
+        initialValue: "" as CFString
+    )
+    return name as String
+}
+
+private func isHidden(_ device: AudioDeviceID) throws -> Bool {
+    var address = AudioObjectPropertyAddress(
+        mSelector: kAudioDevicePropertyIsHidden,
+        mScope: kAudioObjectPropertyScopeGlobal,
+        mElement: kAudioObjectPropertyElementMain
+    )
+    let value: UInt32 = try propertyData(objectID: device, address: &address, initialValue: 0)
+    return value != 0
+}
+
+private func channelCount(
+    _ device: AudioDeviceID,
+    scope: AudioObjectPropertyScope,
+    label: String
+) throws -> UInt32 {
     var address = AudioObjectPropertyAddress(
         mSelector: kAudioDevicePropertyStreamConfiguration,
-        mScope: kAudioDevicePropertyScopeInput,
+        mScope: scope,
         mElement: kAudioObjectPropertyElementMain
     )
     var size: UInt32 = 0
-    try check(AudioObjectGetPropertyDataSize(device, &address, 0, nil, &size), "size input layout")
+    try check(AudioObjectGetPropertyDataSize(device, &address, 0, nil, &size), "size \(label) layout")
 
     let storage = UnsafeMutableRawPointer.allocate(
         byteCount: Int(size), alignment: MemoryLayout<AudioBufferList>.alignment
@@ -104,7 +122,7 @@ private func inputChannelCount(_ device: AudioDeviceID) throws -> UInt32 {
     defer { storage.deallocate() }
     try check(
         AudioObjectGetPropertyData(device, &address, 0, nil, &size, storage),
-        "read input layout"
+        "read \(label) layout"
     )
 
     let buffers = UnsafeMutableAudioBufferListPointer(storage.assumingMemoryBound(to: AudioBufferList.self))
@@ -128,41 +146,6 @@ private func availableSampleRates(_ device: AudioDeviceID) throws -> [Double] {
     return ranges.filter { $0.mMinimum == $0.mMaximum }.map(\.mMinimum)
 }
 
-private func nominalSampleRate(_ device: AudioDeviceID) throws -> Double {
-    var address = AudioObjectPropertyAddress(
-        mSelector: kAudioDevicePropertyNominalSampleRate,
-        mScope: kAudioObjectPropertyScopeGlobal,
-        mElement: kAudioObjectPropertyElementMain
-    )
-    return try propertyData(objectID: device, address: &address, initialValue: Float64(0))
-}
-
-private func setNominalSampleRate(_ rate: Double, on device: AudioDeviceID) throws {
-    var address = AudioObjectPropertyAddress(
-        mSelector: kAudioDevicePropertyNominalSampleRate,
-        mScope: kAudioObjectPropertyScopeGlobal,
-        mElement: kAudioObjectPropertyElementMain
-    )
-    var mutableRate = rate
-    try check(
-        AudioObjectSetPropertyData(
-            device, &address, 0, nil, UInt32(MemoryLayout<Float64>.size), &mutableRate
-        ),
-        "set nominal sample rate to \(Int(rate)) Hz"
-    )
-
-    let deadline = Date().addingTimeInterval(3)
-    while Date() < deadline {
-        if try nominalSampleRate(device) == rate { return }
-        Thread.sleep(forTimeInterval: 0.05)
-    }
-    throw NSError(
-        domain: "MicFlurryASRVerification",
-        code: 2,
-        userInfo: [NSLocalizedDescriptionKey: "timed out changing nominal sample rate to \(Int(rate)) Hz"]
-    )
-}
-
 private func signedInt16MonoASBD() -> AudioStreamBasicDescription {
     AudioStreamBasicDescription(
         mSampleRate: asrSampleRate,
@@ -177,7 +160,11 @@ private func signedInt16MonoASBD() -> AudioStreamBasicDescription {
     )
 }
 
-private func makeHALUnit(for device: AudioDeviceID) throws -> AudioUnit {
+private func makeHALUnit(
+    for device: AudioDeviceID,
+    inputEnabled: Bool,
+    label: String
+) throws -> AudioUnit {
     var description = AudioComponentDescription(
         componentType: kAudioUnitType_Output,
         componentSubType: kAudioUnitSubType_HALOutput,
@@ -196,6 +183,31 @@ private func makeHALUnit(for device: AudioDeviceID) throws -> AudioUnit {
     try check(AudioComponentInstanceNew(component, &unit), "create AUHAL instance")
     guard let unit else { fatalError("AudioComponentInstanceNew returned no instance") }
 
+    var inputState: UInt32 = inputEnabled ? 1 : 0
+    var outputState: UInt32 = inputEnabled ? 0 : 1
+    try check(
+        AudioUnitSetProperty(
+            unit,
+            kAudioOutputUnitProperty_EnableIO,
+            kAudioUnitScope_Input,
+            1,
+            &inputState,
+            UInt32(MemoryLayout<UInt32>.size)
+        ),
+        "configure \(label) AUHAL input state"
+    )
+    try check(
+        AudioUnitSetProperty(
+            unit,
+            kAudioOutputUnitProperty_EnableIO,
+            kAudioUnitScope_Output,
+            0,
+            &outputState,
+            UInt32(MemoryLayout<UInt32>.size)
+        ),
+        "configure \(label) AUHAL output state"
+    )
+
     var mutableDevice = device
     try check(
         AudioUnitSetProperty(
@@ -206,13 +218,17 @@ private func makeHALUnit(for device: AudioDeviceID) throws -> AudioUnit {
             &mutableDevice,
             UInt32(MemoryLayout<AudioDeviceID>.size)
         ),
-        "select MicFlurry in AUHAL"
+        "select \(label) in AUHAL"
     )
     return unit
 }
 
 private func verifyProducerFormat(on device: AudioDeviceID) throws {
-    let unit = try makeHALUnit(for: device)
+    let unit = try makeHALUnit(
+        for: device,
+        inputEnabled: false,
+        label: "MicFlurry Internal"
+    )
     defer { AudioComponentInstanceDispose(unit) }
     var format = signedInt16MonoASBD()
     try check(
@@ -231,32 +247,12 @@ private func verifyProducerFormat(on device: AudioDeviceID) throws {
 }
 
 private func verifyConsumerFormat(on device: AudioDeviceID) throws {
-    let unit = try makeHALUnit(for: device)
+    let unit = try makeHALUnit(
+        for: device,
+        inputEnabled: true,
+        label: "MicFlurry"
+    )
     defer { AudioComponentInstanceDispose(unit) }
-    var enabled: UInt32 = 1
-    var disabled: UInt32 = 0
-    try check(
-        AudioUnitSetProperty(
-            unit,
-            kAudioOutputUnitProperty_EnableIO,
-            kAudioUnitScope_Input,
-            1,
-            &enabled,
-            UInt32(MemoryLayout<UInt32>.size)
-        ),
-        "enable AUHAL input"
-    )
-    try check(
-        AudioUnitSetProperty(
-            unit,
-            kAudioOutputUnitProperty_EnableIO,
-            kAudioUnitScope_Output,
-            0,
-            &disabled,
-            UInt32(MemoryLayout<UInt32>.size)
-        ),
-        "disable unused AUHAL output"
-    )
     var format = signedInt16MonoASBD()
     try check(
         AudioUnitSetProperty(
@@ -274,39 +270,66 @@ private func verifyConsumerFormat(on device: AudioDeviceID) throws {
 }
 
 do {
-    let device = try findMicFlurry()
-    let channels = try inputChannelCount(device)
-    guard channels == 1 else {
+    let inputDevice = try findDevice(uid: inputDeviceUID)
+    let injectionDevice = try findDevice(uid: injectionDeviceUID)
+
+    guard try deviceName(inputDevice) == "MicFlurry", try !isHidden(inputDevice) else {
         throw NSError(
             domain: "MicFlurryASRVerification",
             code: 4,
-            userInfo: [NSLocalizedDescriptionKey: "expected one input channel, found \(channels)"]
+            userInfo: [NSLocalizedDescriptionKey: "MicFlurry input endpoint has the wrong name or visibility"]
         )
     }
-
-    let rates = try availableSampleRates(device)
-    for requiredRate in [8_000.0, 16_000.0, 44_100.0, 48_000.0] where !rates.contains(requiredRate) {
+    guard try deviceName(injectionDevice) == "MicFlurry Internal", try isHidden(injectionDevice) else {
         throw NSError(
             domain: "MicFlurryASRVerification",
-            code: 5,
-            userInfo: [NSLocalizedDescriptionKey: "missing required sample rate \(Int(requiredRate)) Hz"]
+            code: 4,
+            userInfo: [NSLocalizedDescriptionKey: "MicFlurry Internal has the wrong name or visibility"]
         )
     }
 
-    let originalRate = try nominalSampleRate(device)
-    if originalRate != asrSampleRate {
-        try setNominalSampleRate(asrSampleRate, on: device)
+    let inputChannels = try channelCount(
+        inputDevice, scope: kAudioDevicePropertyScopeInput, label: "MicFlurry input"
+    )
+    let visibleOutputChannels = try channelCount(
+        inputDevice, scope: kAudioDevicePropertyScopeOutput, label: "MicFlurry output"
+    )
+    let internalInputChannels = try channelCount(
+        injectionDevice, scope: kAudioDevicePropertyScopeInput, label: "MicFlurry Internal input"
+    )
+    let injectionChannels = try channelCount(
+        injectionDevice, scope: kAudioDevicePropertyScopeOutput, label: "MicFlurry Internal output"
+    )
+    guard inputChannels == 1, visibleOutputChannels == 0,
+        internalInputChannels == 0, injectionChannels == 1
+    else {
+        throw NSError(
+            domain: "MicFlurryASRVerification",
+            code: 4,
+            userInfo: [
+                NSLocalizedDescriptionKey:
+                    "expected visible 1-in/0-out and internal 0-in/1-out topology"
+            ]
+        )
     }
-    defer {
-        if originalRate != asrSampleRate {
-            try? setNominalSampleRate(originalRate, on: device)
+
+    for device in [inputDevice, injectionDevice] {
+        let rates = try availableSampleRates(device)
+        for requiredRate in [8_000.0, 16_000.0, 44_100.0, 48_000.0]
+        where !rates.contains(requiredRate) {
+            throw NSError(
+                domain: "MicFlurryASRVerification",
+                code: 5,
+                userInfo: [NSLocalizedDescriptionKey: "missing required sample rate \(Int(requiredRate)) Hz"]
+            )
         }
     }
 
-    try verifyProducerFormat(on: device)
-    try verifyConsumerFormat(on: device)
+    try verifyProducerFormat(on: injectionDevice)
+    try verifyConsumerFormat(on: inputDevice)
+    print("PASS: MicFlurry is visible input-only and MicFlurry Internal is hidden output-only.")
     print("PASS: producer and consumer AUHAL units accept signed Int16 mono PCM at 16 kHz.")
-    print("PASS: required device rates are available: 8000, 16000, 44100, 48000 Hz.")
+    print("PASS: both endpoints offer 8000, 16000, 44100, and 48000 Hz.")
 } catch {
     fputs("FAIL: \(error.localizedDescription)\n", stderr)
     exit(1)

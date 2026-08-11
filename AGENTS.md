@@ -10,18 +10,18 @@ producer continuously writes PCM through the standard CoreAudio output API; cons
 same samples from the MicFlurry input.
 
 ```text
-producer -> MicFlurry output -> BlackHole loopback buffer -> MicFlurry input -> consumer
+producer -> MicFlurry Internal output -> BlackHole loopback buffer -> MicFlurry input -> consumer
 ```
 
 The producer and driver remain separate programs. Do not introduce a custom IPC protocol or move
 PCM ingestion into the driver for the MVP.
 
-## v0.1 driver contract
+## Current driver contract (Milestone 1)
 
 - Name: `MicFlurry`
 - Bundle ID: `io.phateffect.MicFlurry`
-- Device UID: `MicFlurry_UID`
-- Channels: one input and one output, both visible
+- Visible input device: `MicFlurry`, UID `MicFlurry_UID`, one input and no output
+- Hidden injection device: `MicFlurry Internal`, UID `MicFlurry_2_UID`, no input and one output
 - Native HAL format: mono 32-bit Float PCM
 - ASR client format: signed 16-bit little-endian PCM, mono, 16 kHz through standard CoreAudio
   conversion on both the producer and consumer boundaries
@@ -44,10 +44,12 @@ MicFlurry maintains a small patch at `patches/mic-flurry.patch`. The patch curre
 
 1. device transport from Virtual to USB
 2. the CFPlugIn factory UUID
+3. output stream and output control ownership from the visible input device to the internal output
+   device, as required by the split mirror topology
 
-Names, bundle identity, manufacturer, channel count, sample rates, input/output presence, and the
-empty upstream icon setting are supplied through `GCC_PREPROCESSOR_DEFINITIONS` in
-`scripts/build-driver.sh`.
+Names, bundle identity, manufacturer, channel count, sample rates, endpoint visibility and
+input/output presence, and the empty upstream icon setting are supplied through
+`GCC_PREPROCESSOR_DEFINITIONS` in `scripts/build-driver.sh`.
 
 When updating BlackHole:
 
@@ -99,12 +101,11 @@ installer; `sudo killall coreaudiod` is the faster development path.
 
 ## Roadmap boundaries
 
-- v0.1 keeps the mature BlackHole input/output loopback as the injection path.
-- v0.2 may expose a visible input-only `MicFlurry` backed by a hidden output-only mirror device.
+- The current Milestone 1 topology exposes a visible input-only `MicFlurry` backed by a hidden
+  output-only `MicFlurry Internal` mirror device.
 - v0.3 may add remote/GATT receive, decoding, and userspace resampling before CoreAudio output.
 
-Do not begin hidden-device, BLE/GATT, or custom driver IPC work unless the user explicitly advances
-the roadmap.
+Do not begin BLE/GATT or custom driver IPC work unless the user explicitly advances the roadmap.
 
 ## Licensing and branding
 
