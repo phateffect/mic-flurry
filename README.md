@@ -1,19 +1,22 @@
 # MicFlurry
 
 MicFlurry is a macOS virtual microphone based on
-[BlackHole](https://github.com/ExistentialAudio/BlackHole). An application writes audio to the
-MicFlurry output and another application reads the same audio from the MicFlurry input.
-
-The first MVP intentionally exposes both sides of one loopback device:
+[BlackHole](https://github.com/ExistentialAudio/BlackHole). A producer resolves the hidden
+`MicFlurry Internal` endpoint by UID and writes audio to it; consuming applications see only the
+`MicFlurry` microphone input.
 
 ```text
-PCM producer -> MicFlurry output -> shared loopback buffer -> MicFlurry input -> consuming app
+PCM producer -> MicFlurry Internal output -> shared loopback buffer -> MicFlurry input -> consuming app
 ```
 
 ## Install MicFlurry
 
 MicFlurry currently ships as an unsigned, unnotarized test package for macOS. It is intended for
 developers and trusted testers.
+
+The published v0.1.0 package is the Milestone 0 baseline and still exposes input and output on the
+same visible device. The Milestone 1 topology described elsewhere in this README is currently
+available from source and will apply to the next package release.
 
 1. Open the [latest GitHub Release](https://github.com/phateffect/mic-flurry/releases/latest).
 2. Download both `MicFlurry-<version>.pkg` and `MicFlurry-<version>.pkg.sha256`.
@@ -38,9 +41,10 @@ developers and trusted testers.
    appears. Restart applications that were open during installation because they may cache the
    audio-device list.
 
-To use it, select `MicFlurry` as the output device in the application producing audio, then select
-`MicFlurry` as the microphone/input device in the application receiving audio. Both sides are
-visible in the v0.1 MVP.
+With the published v0.1.0 package, select `MicFlurry` for both producer output and consumer input.
+With a current source build, consumers select `MicFlurry`, while producers resolve the hidden
+injection endpoint using CoreAudio's `kAudioHardwarePropertyTranslateUIDToDevice` and the stable UID
+`MicFlurry_2_UID`; it intentionally does not appear in normal device pickers.
 
 If the driver file exists at `/Library/Audio/Plug-Ins/HAL/MicFlurry.driver` but the device does not
 appear, restart CoreAudio, reopen Audio MIDI Setup, and finally reboot macOS. See [INSTALL.md](INSTALL.md)
@@ -50,12 +54,13 @@ for detailed verification and troubleshooting commands.
 
 - Device and driver name: `MicFlurry`
 - Bundle ID: `io.phateffect.MicFlurry`
-- Device UID: `MicFlurry_UID`
+- Visible input: `MicFlurry`, UID `MicFlurry_UID`, one input channel and no output channels
+- Hidden injection output: `MicFlurry Internal`, UID `MicFlurry_2_UID`, no input channels and one
+  output channel
 - Independent CFPlugIn factory UUID
 - Transport type: USB (for applications that reject virtual transport devices)
 - Format: 1-channel, 32-bit Float PCM
 - Supported sample rates: 8 kHz, 16 kHz, 44.1 kHz, and 48 kHz (48 kHz default)
-- Input and output are both visible in v0.1
 
 The driver's native HAL buffer remains mono `Float32`, as required by the upstream BlackHole data
 path. Standard CoreAudio clients can write and capture signed 16-bit mono PCM at 16 kHz: AUHAL
@@ -78,8 +83,9 @@ Chunk size and WebSocket pacing belong in the ASR uploader, not in this driver. 
 SInt16, 20/40/100 ms contain 640/1,280/3,200 bytes respectively.
 
 BlackHole remains an unmodified Git submodule. `patches/mic-flurry.patch` contains the only source
-differences: the USB transport type and the independent plug-in UUID. All other customization is
-passed to `xcodebuild` by `scripts/build-driver.sh`.
+differences: the USB transport type, the independent plug-in UUID, and output-object ownership for
+the split mirror topology. Names, visibility, formats, and other customization are passed to
+`xcodebuild` by `scripts/build-driver.sh`.
 
 ## Clone and build
 
@@ -139,14 +145,15 @@ sudo killall coreaudiod
 
 Verify the following in Audio MIDI Setup:
 
-1. `MicFlurry` appears as an audio device.
-2. It has one input channel and one output channel.
-3. Its available sample rates are 8,000, 16,000, 44,100, and 48,000 Hz.
-4. Playing a test signal to its output can be recorded from its input.
+1. `MicFlurry` appears as an input-only audio device with one channel.
+2. `MicFlurry Internal` does not appear in normal device pickers but resolves by UID
+   `MicFlurry_2_UID` and has one output channel.
+3. Both endpoints offer 8,000, 16,000, 44,100, and 48,000 Hz.
+4. Playing a test signal to `MicFlurry Internal` can be recorded from `MicFlurry`.
 
 Run the executable compatibility check after installation. It verifies the device rates and asks
-AUHAL to initialize both the producer and consumer sides as signed Int16, mono, 16 kHz. It briefly
-changes MicFlurry to 16 kHz and restores the previous rate before exiting:
+AUHAL to initialize both the producer and consumer sides as signed Int16, mono, 16 kHz while the
+driver remains at its current native rate:
 
 ```bash
 ./scripts/verify-asr-format.swift
@@ -168,9 +175,9 @@ longer applies, refresh only `patches/mic-flurry.patch`; do not edit the submodu
 
 ## Roadmap
 
-- v0.1: visible input + output loopback and a PCM/test-tone producer
-- v0.2: visible input-only device backed by a hidden output-only mirror device
-- v0.3: receive, decode, resample, and inject remote audio
+- Milestone 0: visible input + output loopback baseline
+- Milestone 1: visible input-only device backed by a hidden output-only mirror device (complete)
+- Milestone 2: foreground Rust Bluetooth-to-CoreAudio vertical slice
 
 The component boundaries, daemon/control API design, persistence decisions, and staged delivery plan
 are documented in [MILESTONES.md](MILESTONES.md).

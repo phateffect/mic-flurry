@@ -86,19 +86,11 @@ filenames together.
 
    - device name: `MicFlurry`
    - transport: USB
-   - one input channel and one output channel
+   - one input channel and one output channel (the v0.1.0 Milestone 0 topology)
    - available rates: 8,000, 16,000, 44,100, and 48,000 Hz
 
-7. From a MicFlurry source checkout, verify the common ASR client format:
-
-   ```bash
-   ./scripts/verify-asr-format.swift
-   ```
-
-   This asks AUHAL to initialize both sides of MicFlurry as signed 16-bit little-endian PCM, mono,
-   16 kHz. It briefly selects 16 kHz on MicFlurry and restores the previous rate before exiting.
-   The driver keeps its native Float32 buffer; CoreAudio performs the application-boundary format
-   conversion.
+The current `scripts/verify-asr-format.swift` targets the Milestone 1 split topology and is not
+compatible with the published v0.1.0 package.
 
 ## Build and install from source
 
@@ -121,8 +113,28 @@ sudo killall coreaudiod
 For a release-style local installer:
 
 ```bash
-./scripts/build-package.sh 0.1.0
+./scripts/build-package.sh <version>
 ```
+
+## Verify a Milestone 1 source build
+
+After installing the current source candidate with explicit user authorization, verify that:
+
+- visible `MicFlurry` has one input and no output
+- hidden `MicFlurry Internal` resolves by UID `MicFlurry_2_UID`, with no input and one output
+- both endpoints offer 8,000, 16,000, 44,100, and 48,000 Hz
+
+Then verify the common ASR client format:
+
+```bash
+./scripts/verify-asr-format.swift
+```
+
+This resolves both endpoints by UID, checks their visibility and channel topology, and asks AUHAL
+to initialize `MicFlurry Internal` as the producer and `MicFlurry` as the consumer using signed
+16-bit little-endian PCM, mono, 16 kHz while the driver remains at its current native rate. The
+driver keeps its native Float32 buffer; CoreAudio performs the application-boundary format
+conversion.
 
 ## Troubleshooting a missing device
 
