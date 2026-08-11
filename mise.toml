@@ -1,0 +1,4 @@
+[tools]
+gh = "latest"
+pre-commit = "latest"
+worktrunk = "latest"

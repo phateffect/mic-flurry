@@ -1,0 +1,7 @@
+# Trust this worktree's checked-in mise configuration before development starts.
+[[pre-start]]
+trust = "mise trust"
+
+# Remove stale origin tracking references after a worktree is removed.
+[[post-remove]]
+prune-origin = "git remote prune origin"
