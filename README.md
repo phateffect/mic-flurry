@@ -10,6 +10,42 @@ The first MVP intentionally exposes both sides of one loopback device:
 PCM producer -> MicFlurry output -> shared loopback buffer -> MicFlurry input -> consuming app
 ```
 
+## Install MicFlurry
+
+MicFlurry currently ships as an unsigned, unnotarized test package for macOS. It is intended for
+developers and trusted testers.
+
+1. Open the [latest GitHub Release](https://github.com/phateffect/mic-flurry/releases/latest).
+2. Download both `MicFlurry-<version>.pkg` and `MicFlurry-<version>.pkg.sha256`.
+3. Put the two files in the same directory and verify the download in Terminal:
+
+   ```bash
+   cd ~/Downloads
+   shasum -a 256 -c MicFlurry-0.1.0.pkg.sha256
+   ```
+
+4. Double-click `MicFlurry-0.1.0.pkg` and follow the Installer prompts.
+5. If macOS blocks the package, first attempt to open it, then go to **System Settings → Privacy &
+   Security**, find the blocked package, and choose **Open Anyway**. Do not disable Gatekeeper
+   globally.
+6. Restart the Mac after installation. For development, restarting CoreAudio is often enough:
+
+   ```bash
+   sudo killall coreaudiod
+   ```
+
+7. Open **Audio MIDI Setup** or **System Settings → Sound → Input** and confirm that `MicFlurry`
+   appears. Restart applications that were open during installation because they may cache the
+   audio-device list.
+
+To use it, select `MicFlurry` as the output device in the application producing audio, then select
+`MicFlurry` as the microphone/input device in the application receiving audio. Both sides are
+visible in the v0.1 MVP.
+
+If the driver file exists at `/Library/Audio/Plug-Ins/HAL/MicFlurry.driver` but the device does not
+appear, restart CoreAudio, reopen Audio MIDI Setup, and finally reboot macOS. See [INSTALL.md](INSTALL.md)
+for detailed verification and troubleshooting commands.
+
 ## Driver profile
 
 - Device and driver name: `MicFlurry`
