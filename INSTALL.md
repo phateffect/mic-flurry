@@ -87,7 +87,18 @@ filenames together.
    - device name: `MicFlurry`
    - transport: USB
    - one input channel and one output channel
-   - available rates: 16,000, 44,100, and 48,000 Hz
+   - available rates: 8,000, 16,000, 44,100, and 48,000 Hz
+
+7. From a MicFlurry source checkout, verify the common ASR client format:
+
+   ```bash
+   ./scripts/verify-asr-format.swift
+   ```
+
+   This asks AUHAL to initialize both sides of MicFlurry as signed 16-bit little-endian PCM, mono,
+   16 kHz. It briefly selects 16 kHz on MicFlurry and restores the previous rate before exiting.
+   The driver keeps its native Float32 buffer; CoreAudio performs the application-boundary format
+   conversion.
 
 ## Build and install from source
 

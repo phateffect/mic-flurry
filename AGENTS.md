@@ -22,8 +22,10 @@ PCM ingestion into the driver for the MVP.
 - Bundle ID: `io.phateffect.MicFlurry`
 - Device UID: `MicFlurry_UID`
 - Channels: one input and one output, both visible
-- Sample format: 32-bit Float PCM
-- Supported rates: exactly 16,000, 44,100, and 48,000 Hz
+- Native HAL format: mono 32-bit Float PCM
+- ASR client format: signed 16-bit little-endian PCM, mono, 16 kHz through standard CoreAudio
+  conversion on both the producer and consumer boundaries
+- Supported rates: 8,000, 16,000, 44,100, and 48,000 Hz
 - Default rate: 48,000 Hz
 - Reported device transport: USB
 - Architectures: universal `arm64` and `x86_64`
@@ -79,7 +81,8 @@ git diff --check
 ```
 
 Also verify bundle ID, factory UUID, ad-hoc signature, `arm64`/`x86_64` architectures, package
-payload, and checksum.
+payload, and checksum. After installing the candidate, run `./scripts/verify-asr-format.swift` to
+verify the 16 kHz mono SInt16 producer and consumer contract through AUHAL.
 
 ## Installation and operational safety
 

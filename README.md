@@ -54,8 +54,28 @@ for detailed verification and troubleshooting commands.
 - Independent CFPlugIn factory UUID
 - Transport type: USB (for applications that reject virtual transport devices)
 - Format: 1-channel, 32-bit Float PCM
-- Supported sample rates: 16 kHz, 44.1 kHz, and 48 kHz (48 kHz default)
+- Supported sample rates: 8 kHz, 16 kHz, 44.1 kHz, and 48 kHz (48 kHz default)
 - Input and output are both visible in v0.1
+
+The driver's native HAL buffer remains mono `Float32`, as required by the upstream BlackHole data
+path. Standard CoreAudio clients can write and capture signed 16-bit mono PCM at 16 kHz: AUHAL
+performs the conversion at the application boundary. This is the common `SInt16LE / mono / 16000 Hz`
+format expected by ASR services, so applications do not need to modify the driver or its ring buffer.
+The 8 kHz mode is also available for telephony ASR models; 16 kHz remains the recommended default
+for general speech recognition.
+
+### ASR compatibility target
+
+The baseline is based on the vendors' current official streaming-ASR documentation:
+
+| Service | PCM requirement | Typical upload cadence |
+| --- | --- | --- |
+| [Doubao / Volcengine Realtime ASR](https://www.volcengine.com/docs/6893/1527759) | raw PCM, 16 kHz, 16-bit, mono | official example uses 100 ms chunks (3,200 bytes) |
+| [iFLYTEK real-time transcription](https://static.xfyun.cn/doc/asr/rtasr/API.html) | `pcm_s16le`, 16 kHz, 16-bit | 40 ms / 1,280 bytes recommended |
+| [Alibaba Cloud real-time speech recognition](https://help.aliyun.com/zh/isi/developer-reference/api-reference) | mono, 16-bit; 8 or 16 kHz | API-dependent; 16 kHz is the general model target |
+
+Chunk size and WebSocket pacing belong in the ASR uploader, not in this driver. At 16 kHz mono
+SInt16, 20/40/100 ms contain 640/1,280/3,200 bytes respectively.
 
 BlackHole remains an unmodified Git submodule. `patches/mic-flurry.patch` contains the only source
 differences: the USB transport type and the independent plug-in UUID. All other customization is
@@ -121,8 +141,16 @@ Verify the following in Audio MIDI Setup:
 
 1. `MicFlurry` appears as an audio device.
 2. It has one input channel and one output channel.
-3. Its available sample rates are 16,000, 44,100, and 48,000 Hz.
+3. Its available sample rates are 8,000, 16,000, 44,100, and 48,000 Hz.
 4. Playing a test signal to its output can be recorded from its input.
+
+Run the executable compatibility check after installation. It verifies the device rates and asks
+AUHAL to initialize both the producer and consumer sides as signed Int16, mono, 16 kHz. It briefly
+changes MicFlurry to 16 kHz and restores the previous rate before exiting:
+
+```bash
+./scripts/verify-asr-format.swift
+```
 
 Some applications cache the audio-device list and must be restarted after driver installation.
 Applications also need macOS microphone permission before they can capture from MicFlurry.

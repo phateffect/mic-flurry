@@ -31,7 +31,7 @@ mkdir -p "${WORK_DIR}" "${OUTPUT_DIR}"
 git -C "${UPSTREAM_DIR}" archive HEAD | tar -x -C "${WORK_DIR}"
 patch --directory="${WORK_DIR}" --strip=1 --forward < "${PATCH_FILE}"
 
-readonly DEFINITIONS='$(inherited) DEBUG=0 kDriver_Name=\"MicFlurry\" kDevice_Name=\"MicFlurry\" kHas_Driver_Name_Format=false kPlugIn_BundleID=\"io.phateffect.MicFlurry\" kPlugIn_Icon=\"\" kManufacturer_Name=\"MicFlurry\" kNumber_Of_Channels=1 kSampleRates=16000,44100,48000 kDevice_HasInput=true kDevice_HasOutput=true'
+readonly DEFINITIONS='$(inherited) DEBUG=0 kDriver_Name=\"MicFlurry\" kDevice_Name=\"MicFlurry\" kHas_Driver_Name_Format=false kPlugIn_BundleID=\"io.phateffect.MicFlurry\" kPlugIn_Icon=\"\" kManufacturer_Name=\"MicFlurry\" kNumber_Of_Channels=1 kSampleRates=8000,16000,44100,48000 kDevice_HasInput=true kDevice_HasOutput=true'
 
 xcodebuild \
   -quiet \
