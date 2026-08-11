@@ -1,0 +1,3 @@
+[submodule "upstream/BlackHole"]
+	path = upstream/BlackHole
+	url = https://github.com/ExistentialAudio/BlackHole.git

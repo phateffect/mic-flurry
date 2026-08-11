@@ -1,0 +1,15 @@
+diff --git a/BlackHole/BlackHole.c b/BlackHole/BlackHole.c
+--- a/BlackHole/BlackHole.c
++++ b/BlackHole/BlackHole.c
+@@ -2548 +2548 @@ static OSStatus	BlackHole_GetDevicePropertyData(AudioServerPlugInDriverRef inDr
+-			*((UInt32*)outData) = kAudioDeviceTransportTypeVirtual;
++			*((UInt32*)outData) = kAudioDeviceTransportTypeUSB;
+diff --git a/BlackHole/BlackHole.plist b/BlackHole/BlackHole.plist
+--- a/BlackHole/BlackHole.plist
++++ b/BlackHole/BlackHole.plist
+@@ -27 +27 @@
+-		<key>e395c745-4eea-4d94-bb92-46224221047c</key>
++		<key>67a7bfee-45f5-4ea8-91f0-bf42528402d7</key>
+@@ -34 +34 @@
+-			<string>e395c745-4eea-4d94-bb92-46224221047c</string>
++			<string>67a7bfee-45f5-4ea8-91f0-bf42528402d7</string>

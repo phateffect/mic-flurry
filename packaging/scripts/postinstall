@@ -1,0 +1,10 @@
+#!/bin/sh
+
+set -e
+
+driver_path="/Library/Audio/Plug-Ins/HAL/MicFlurry.driver"
+
+chown -R root:wheel "$driver_path"
+find "$driver_path" -type d -exec chmod 755 {} \;
+find "$driver_path" -type f -exec chmod 644 {} \;
+find "$driver_path/Contents/MacOS" -type f -exec chmod 755 {} \;
