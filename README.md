@@ -172,6 +172,9 @@ longer applies, refresh only `patches/mic-flurry.patch`; do not edit the submodu
 - v0.2: visible input-only device backed by a hidden output-only mirror device
 - v0.3: receive, decode, resample, and inject remote audio
 
+The component boundaries, daemon/control API design, persistence decisions, and staged delivery plan
+are documented in [MILESTONES.md](MILESTONES.md).
+
 ## License
 
 MicFlurry, including its driver patches and build tooling, is distributed under GPL-3.0. See
