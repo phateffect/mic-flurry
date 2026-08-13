@@ -382,16 +382,57 @@ not include reliable stored-recording transfer, OTA, a daemon, or a custom drive
   daemon ownership are validated. Developer ID/notarization, fast user switching, and the remaining
   hardware acceptance cases are release gates rather than core-refactor work.
 
-### Milestone 4 — optional clients and product packaging
+### Milestone 4A — unified private beta
 
-- Build optional TUI, CLI, web, or native clients using the same public control API; do not duplicate
-  daemon business logic.
-- Package the driver, independent core services, service host, and any optional clients into coherent
-  artifacts while preserving headless operation.
-- Add upgrade and uninstall handling for the HAL plug-in, launchd service, database, and application.
-- Pursue Developer ID signing, notarization, and low-friction Homebrew distribution only when the
-  project is ready to pay for and maintain the required Apple release credentials.
+Turn the completed core into a repeatable, owner-and-trusted-testers product without claiming the
+properties of a public notarized release:
 
-Polished clients are intentionally deferred until the Swift daemon/helper boundary and public API
-are stable. The signed `.app` service host is packaging infrastructure and must not couple the core
-to a particular UI.
+- Produce one versioned private-beta distribution containing the MicFlurry driver, service-host app,
+  per-user daemon, root HID helper, installer and uninstaller entry points, checksums, license,
+  attribution, and exact corresponding source. The components may remain separately packaged
+  inside the distribution when macOS installation boundaries require it, but the tester should not
+  need to assemble artifacts from different builds.
+- Keep installation explicitly authorized and limited to the documented MicFlurry paths. Installing
+  or upgrading the driver must not restart `coreaudiod` automatically; tell the tester when a reboot
+  or deliberate development restart is required.
+- Make fresh installation, UI-free login startup, TCC approval and revocation, service approval
+  changes, upgrade with rollback, and uninstall documented and repeatable. An upgrade preserves the
+  user database, settings, and recordings. Uninstall releases HID capture before removing code and
+  states clearly which user data it retains.
+- Add a GitHub Actions continuous-integration workflow on pull requests and relevant branch pushes.
+  On a macOS runner it checks out submodules, uses the repository-supported toolchains, and runs at
+  least the Swift formatting/project checks and deterministic Swift tests. Changes to the public
+  control protocol or Rust demo client must also run the demo-client checks.
+- Add a GitHub Actions packaging workflow for version tags and manual dispatch. It builds the driver,
+  app/services, and unified private-beta distribution from the same commit; validates bundle and
+  plist identities, architectures, patch application, package contents, uninstall targets, and
+  checksums; and uploads the packages, checksums, and corresponding-source artifact together.
+- Treat CI-produced packages as unsigned or ad-hoc-signed private test artifacts. CI must not call
+  them notarized, publish them as a public release, disable Gatekeeper, modify TCC, install into the
+  runner's system HAL directory, or restart `coreaudiod`. Developer ID secrets and notarization are
+  introduced only as a separately reviewed public-release path.
+- Add an end-to-end manual acceptance run on a clean test Mac: verify checksums, install with native
+  authorization, approve only the required permissions, log out or reboot, attach RC003, stream PCM
+  through the installed visible `MicFlurry` input, upgrade while preserving state, and uninstall
+  while restoring the remote's original HID behavior.
+
+Milestone 4A is complete when a trusted tester can start with only one CI-produced distribution and
+finish that lifecycle without a development checkout. Hosted CI covers deterministic build and
+package structure; HAL, Bluetooth, TCC, administrator prompts, reboot/login, and physical RC003
+behavior remain explicit real-Mac acceptance steps.
+
+### Milestone 4B — optional clients and public packaging
+
+- Build optional CLI, web, menu-bar, or native clients using the same public control API; do not
+  duplicate daemon business logic. Keep the retained TUI as a reference client rather than a core
+  runtime owner.
+- Preserve headless operation and keep the signed `.app` service host independent from any optional
+  UI. A thin native client may improve daily use after 4A, but it must not become necessary for audio
+  streaming, recording, persistence, or helper lifecycle.
+- Complete fast-user-switching validation and the signed-client rejection matrix before a public
+  multi-user release.
+- Pursue Developer ID signing, notarization, stapling, and low-friction Homebrew distribution only
+  when the project is ready to obtain and maintain the required Apple release credentials.
+
+Milestone 4B is separate from 4A because an ad-hoc private artifact cannot prove Developer ID,
+notarization, or public Gatekeeper behavior, regardless of whether GitHub Actions built it.
