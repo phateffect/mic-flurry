@@ -1,0 +1,25 @@
+{
+  "control": [
+    {
+      "bytes": [10, 2, 18, 52, 254, 220, 32],
+      "expected": "audio_sync:2:4660:-292:32"
+    },
+    {
+      "bytes": [11, 1, 0, 3, 1, 0, 160, 1, 0, 170],
+      "expected": "capabilities:256:3:1:160:1:0:aa"
+    },
+    { "bytes": [8], "expected": "start_search" },
+    { "bytes": [4, 3, 2, 42], "expected": "audio_start:3:2:42" },
+    { "bytes": [0, 7], "expected": "audio_stop:7" },
+    { "bytes": [12, 1, 2], "expected": "mic_open_error:258" },
+    { "bytes": [255, 1, 2], "expected": "unknown:255:0102" }
+  ],
+  "adpcm": [
+    { "encoded": [112], "expected": [11, 13] }
+  ],
+  "frameDeltas": [
+    { "actual": 12, "expectedFrame": 11, "delta": 1 },
+    { "actual": 0, "expectedFrame": 65535, "delta": 1 },
+    { "actual": 65535, "expectedFrame": 0, "delta": -1 }
+  ]
+}

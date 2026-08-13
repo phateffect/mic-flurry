@@ -232,6 +232,122 @@ const STEP_TABLE: [i32; 89] = [
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde::Deserialize;
+    use std::{fmt::Write as _, fs, path::PathBuf};
+
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Fixtures {
+        control: Vec<ControlFixture>,
+        adpcm: Vec<AdpcmFixture>,
+        frame_deltas: Vec<FrameDeltaFixture>,
+    }
+
+    #[derive(Deserialize)]
+    struct ControlFixture {
+        bytes: Vec<u8>,
+        expected: String,
+    }
+
+    #[derive(Deserialize)]
+    struct AdpcmFixture {
+        encoded: Vec<u8>,
+        expected: Vec<i16>,
+    }
+
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct FrameDeltaFixture {
+        actual: u16,
+        expected_frame: u16,
+        delta: i32,
+    }
+
+    fn fixtures() -> Fixtures {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../Fixtures/atvv-v1.json");
+        serde_json::from_slice(&fs::read(path).unwrap()).unwrap()
+    }
+
+    fn hex(bytes: &[u8]) -> String {
+        let mut output = String::with_capacity(bytes.len() * 2);
+        for byte in bytes {
+            write!(&mut output, "{byte:02x}").unwrap();
+        }
+        output
+    }
+
+    fn canonical(message: &ControlMessage) -> String {
+        match message {
+            ControlMessage::AudioStop { reason } => format!("audio_stop:{reason}"),
+            ControlMessage::AudioStart {
+                reason,
+                codec,
+                stream_id,
+            } => format!(
+                "audio_start:{reason}:{}:{stream_id}",
+                match codec {
+                    Codec::Adpcm8Khz => 1,
+                    Codec::Adpcm16Khz => 2,
+                }
+            ),
+            ControlMessage::StartSearch => "start_search".into(),
+            ControlMessage::AudioSync {
+                codec,
+                frame,
+                predictor,
+                step_index,
+            } => format!(
+                "audio_sync:{}:{frame}:{predictor}:{step_index}",
+                match codec {
+                    Codec::Adpcm8Khz => 1,
+                    Codec::Adpcm16Khz => 2,
+                }
+            ),
+            ControlMessage::Capabilities {
+                version,
+                codecs,
+                interaction_model,
+                frame_size,
+                extra_configuration,
+                reserved,
+                firmware_data,
+            } => format!(
+                "capabilities:{version}:{codecs}:{interaction_model}:{frame_size}:\
+                 {extra_configuration}:{reserved}:{}",
+                hex(firmware_data)
+            ),
+            ControlMessage::MicOpenError { code } => format!("mic_open_error:{code}"),
+            ControlMessage::Unknown { command, payload } => {
+                format!("unknown:{command}:{}", hex(payload))
+            }
+        }
+    }
+
+    #[test]
+    fn shared_fixtures_match_the_accepted_rust_behavior() {
+        let fixtures = fixtures();
+        for fixture in fixtures.control {
+            assert_eq!(
+                canonical(&parse_control(&fixture.bytes).unwrap()),
+                fixture.expected
+            );
+        }
+        for fixture in fixtures.adpcm {
+            assert_eq!(
+                ImaAdpcmDecoder::default().decode(&fixture.encoded),
+                fixture.expected
+            );
+        }
+        for fixture in fixtures.frame_deltas {
+            let forward = i32::from(fixture.actual.wrapping_sub(fixture.expected_frame));
+            let delta = if forward <= i32::from(i16::MAX) {
+                forward
+            } else {
+                forward - 65_536
+            };
+            assert_eq!(delta, fixture.delta);
+        }
+    }
 
     #[test]
     fn parses_audio_sync_in_network_byte_order() {

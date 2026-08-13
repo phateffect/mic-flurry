@@ -5,10 +5,9 @@ use crossterm::{
 };
 use futures::StreamExt;
 use micflurry_control::{
-    AudioStatus, ControlClient, DeviceInfo, Event, HidStatus, KeyboardAction, SettingsChange,
+    AudioStatus, ControlClient, DeviceInfo, Event, HidStatus, SettingsChange, SocketControlClient,
     Status,
 };
-use micflurry_core::{LocalControlClient, RuntimeOptions};
 use ratatui::{
     Terminal,
     backend::CrosstermBackend,
@@ -38,12 +37,8 @@ async fn main() -> Result<()> {
             log_writer.map_or_else(|| FileMakeWriter::stderr().boxed(), FileMakeWriter::boxed),
         )
         .init();
-    let options = parse_options()?;
-    let (client, runtime) = micflurry_core::start(options).await?;
-    let result = run_ui(client.clone()).await;
-    client.shutdown().await;
-    runtime.await.context("runtime task failed")?;
-    result
+    let client = SocketControlClient::new(parse_socket_path()?);
+    run_ui(client).await
 }
 
 #[derive(Clone)]
@@ -94,42 +89,28 @@ impl<'a> MakeWriter<'a> for FileMakeWriter {
     }
 }
 
-fn parse_options() -> Result<RuntimeOptions> {
-    let mut options = RuntimeOptions::default();
+fn parse_socket_path() -> Result<PathBuf> {
+    let mut socket_path =
+        SocketControlClient::default_socket_path().map_err(|error| anyhow::anyhow!(error))?;
     let mut arguments = std::env::args().skip(1);
     while let Some(argument) = arguments.next() {
         match argument.as_str() {
-            "--database" => {
-                options.database_path = Some(PathBuf::from(
-                    arguments.next().context("--database requires a path")?,
-                ));
-            }
-            "--no-audio" => options.disable_audio = true,
-            "--no-bluetooth" => options.disable_bluetooth = true,
-            "--seize-hid" => options.seize_hid = true,
-            "--drop-audio-notification" => {
-                let value = arguments
-                    .next()
-                    .context("--drop-audio-notification requires a one-based number")?;
-                let number = value
-                    .parse::<u64>()
-                    .context("--drop-audio-notification must be a positive integer")?;
-                anyhow::ensure!(number > 0, "--drop-audio-notification must be at least 1");
-                options.drop_audio_notification = Some(number);
+            "--socket" => {
+                socket_path = PathBuf::from(arguments.next().context("--socket requires a path")?);
             }
             "-h" | "--help" => {
                 println!(
-                    "MicFlurry foreground TUI\n\nUsage: micflurry [--database PATH] [--no-audio] [--no-bluetooth] [--seize-hid] [--drop-audio-notification N]\n\n--seize-hid exclusively captures the supported remote and forwards known buttons with CGEvent until MicFlurry releases the device."
+                    "MicFlurry daemon TUI\n\nUsage: micflurry [--socket PATH]\n\nClosing the TUI does not stop the MicFlurry daemon, Bluetooth, audio, recording, or HID capture."
                 );
                 std::process::exit(0);
             }
             other => anyhow::bail!("unknown argument {other}"),
         }
     }
-    Ok(options)
+    Ok(socket_path)
 }
 
-async fn run_ui(client: LocalControlClient) -> Result<()> {
+async fn run_ui(client: SocketControlClient) -> Result<()> {
     let mut terminal = setup_terminal()?;
     let result = event_loop(&mut terminal, client).await;
     restore_terminal(&mut terminal)?;
@@ -152,7 +133,7 @@ fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result
 
 async fn event_loop(
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
-    client: LocalControlClient,
+    client: SocketControlClient,
 ) -> Result<()> {
     let mut app = App {
         status: client.status().await?,
@@ -195,14 +176,12 @@ async fn event_loop(
                         let result = if app.status.recording.active { client.stop_recording().await } else { client.start_recording().await };
                         if let Err(error) = result { app.message = error.to_string(); }
                     }
+                    KeyCode::Char('h') => {
+                        let result = if app.status.hid.active { client.stop_hid_capture().await } else { client.start_hid_capture().await };
+                        if let Err(error) = result { app.message = error.to_string(); }
+                    }
                     KeyCode::Char('<' | ',') => adjust_gain(&client, &mut app, -1.0).await,
                     KeyCode::Char('>' | '.') => adjust_gain(&client, &mut app, 1.0).await,
-                    KeyCode::Char(' ') => post(&client, &mut app, KeyboardAction::PlayPause).await,
-                    KeyCode::Char('[') => post(&client, &mut app, KeyboardAction::Previous).await,
-                    KeyCode::Char(']') => post(&client, &mut app, KeyboardAction::Next).await,
-                    KeyCode::Char('-') => post(&client, &mut app, KeyboardAction::VolumeDown).await,
-                    KeyCode::Char('+' | '=') => post(&client, &mut app, KeyboardAction::VolumeUp).await,
-                    KeyCode::Char('m') => post(&client, &mut app, KeyboardAction::Mute).await,
                     _ => {}
                 }
             }
@@ -211,13 +190,7 @@ async fn event_loop(
     Ok(())
 }
 
-async fn post(client: &LocalControlClient, app: &mut App, action: KeyboardAction) {
-    if let Err(error) = client.keyboard_action(action).await {
-        app.message = error.to_string();
-    }
-}
-
-async fn adjust_gain(client: &LocalControlClient, app: &mut App, delta_db: f32) {
+async fn adjust_gain(client: &SocketControlClient, app: &mut App, delta_db: f32) {
     let gain_db = (app.input_gain_db + delta_db).clamp(-24.0, 24.0);
     match client
         .set_settings(SettingsChange {
@@ -245,7 +218,7 @@ struct App {
 impl App {
     fn apply(&mut self, event: Event) {
         match event {
-            Event::Status(status) => self.status = *status,
+            Event::Status { status } => self.status = *status,
             Event::Attaching { active, .. } => self.status.attaching = active,
             Event::Error { message } => self.message = message,
             Event::RecordingStarted { path } => self.message = format!("Recording {path}"),
@@ -437,7 +410,7 @@ fn draw(frame: &mut ratatui::Frame<'_>, app: &mut App) {
         rows[3],
     );
 
-    frame.render_widget(Paragraph::new(" q quit · s refresh macOS · ↑/↓ select · enter attach · d release · r record · </> gain · space/[ ]/-/+/m keys ")
+    frame.render_widget(Paragraph::new(" q quit · s refresh macOS · ↑/↓ select · enter attach · d release · r record · h HID · </> gain ")
         .style(Style::default().fg(Color::DarkGray)).block(Block::default().borders(Borders::ALL)), rows[4]);
 }
 

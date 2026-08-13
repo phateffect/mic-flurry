@@ -23,11 +23,74 @@ run = "cargo clippy --workspace --all-targets -- -D warnings"
 [tasks.rust-check]
 depends = ["rust-fmt", "rust-test", "rust-clippy"]
 
+[tasks.swift-format]
+description = "Lint Swift package formatting"
+run = "swift format lint --recursive --strict Package.swift Sources Tests"
+
+[tasks.swift-build]
+description = "Build the Apple-silicon Swift core"
+env = {
+  CLANG_MODULE_CACHE_PATH = "/tmp/micflurry-swift-clang-module-cache",
+  SWIFT_MODULECACHE_PATH = "/tmp/micflurry-swift-module-cache",
+}
+run = "swift build --arch arm64 --disable-sandbox --cache-path /tmp/micflurry-swiftpm-cache --config-path /tmp/micflurry-swiftpm-config --security-path /tmp/micflurry-swiftpm-security"
+
+[tasks.swift-test]
+description = "Run deterministic Swift core tests"
+env = {
+  CLANG_MODULE_CACHE_PATH = "/tmp/micflurry-swift-clang-module-cache",
+  SWIFT_MODULECACHE_PATH = "/tmp/micflurry-swift-module-cache",
+}
+depends = ["swift-build"]
+run = "swift test --arch arm64 --disable-sandbox --cache-path /tmp/micflurry-swiftpm-cache --config-path /tmp/micflurry-swiftpm-config --security-path /tmp/micflurry-swiftpm-security"
+
+[tasks.swift-check]
+depends = ["swift-format", "swift-plist-check", "swift-test"]
+
+[tasks.swift-plist-check]
+description = "Lint Swift service host templates and packaging scripts"
+run = "plutil -lint packaging/swift-app/*.plist packaging/private/*.plist && bash -n scripts/build-swift-app.sh scripts/check-swift-app.sh scripts/build-private-swift-app.sh scripts/check-private-swift-app.sh scripts/build-private-distribution.sh scripts/install-private-services.sh scripts/uninstall-private-services.sh scripts/private-install-root.sh scripts/private-uninstall-root.sh packaging/private/*.command"
+
+[tasks.swift-app]
+description = "Build the unsigned structural MicFlurry service host app"
+run = "./scripts/build-swift-app.sh 0.3.0"
+
+[tasks.swift-app-check]
+description = "Validate the assembled MicFlurry service host app"
+run = "./scripts/check-swift-app.sh"
+
+[tasks.swift-private-app]
+description = "Build and validate the ad-hoc private service app"
+run = "./scripts/build-private-swift-app.sh 0.3.0"
+
+[tasks.swift-private-test]
+description = "Test private identifier and CDHash mutual authentication"
+env = {
+  CLANG_MODULE_CACHE_PATH = "/tmp/micflurry-swift-clang-module-cache",
+  SWIFT_MODULECACHE_PATH = "/tmp/micflurry-swift-module-cache",
+}
+run = "swift test --arch arm64 --disable-sandbox -Xswiftc -DMICFLURRY_PRIVATE_DISTRIBUTION --filter private --cache-path /tmp/micflurry-swiftpm-cache --config-path /tmp/micflurry-swiftpm-config --security-path /tmp/micflurry-swiftpm-security"
+
+[tasks.swift-private-dist]
+description = "Build a private tester archive and checksum"
+run = "./scripts/build-private-distribution.sh 0.3.0"
+
+[tasks.swift-socket-test]
+description = "Run the host-only Unix control socket integration test"
+env = {
+  CLANG_MODULE_CACHE_PATH = "/tmp/micflurry-swift-clang-module-cache",
+  MICFLURRY_RUN_SOCKET_TESTS = "1",
+  SWIFT_MODULECACHE_PATH = "/tmp/micflurry-swift-module-cache",
+}
+run = "swift test --arch arm64 --disable-sandbox --filter unixSocketServesMultipleClientsAndBroadcastsNotifications --cache-path /tmp/micflurry-swiftpm-cache --config-path /tmp/micflurry-swiftpm-config --security-path /tmp/micflurry-swiftpm-security"
+
+[tasks.check]
+depends = ["rust-check", "swift-check"]
+
 [tasks.micflurry]
-description = "Run the development TUI with sandbox-writable state"
-depends = ["prepare-btleplug"]
-env = { MICFLURRY_LOG = "/tmp/micflurry-dev.log", RUST_LOG = "micflurry_core=debug,micflurry=info" }
-run = "cargo run -p micflurry-tui -- --database /tmp/micflurry-dev.db"
+description = "Run the Rust TUI as a client of the Swift daemon"
+env = { MICFLURRY_LOG = "/tmp/micflurry-tui.log", RUST_LOG = "micflurry=info" }
+run = "cargo run -p micflurry-tui --"
 
 [tasks.hid-seize-probe-build]
 description = "Build the root-only RC003 IOHID seize probe"

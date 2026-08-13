@@ -122,14 +122,19 @@ installer; `sudo killall coreaudiod` is the faster development path.
 - Use `mise run verify-asr` instead of invoking the Swift verifier directly. It puts Swift and Clang
   module caches under `/tmp`. CoreAudio device access can still require running this task in the
   host context because a filesystem-writable sandbox may expose an empty HAL device list.
-- Use `mise run micflurry -- <arguments>` for agent smoke tests. Its default SQLite database is
-  `/tmp/micflurry-dev.db`; pass a later `--database PATH` to override it. Do not use the production
-  database in `~/Library/Application Support` for automated tests.
+- `mise run micflurry -- <arguments>` runs the Rust TUI as a pure socket client of `micflurryd`.
+  Pass `--socket PATH` for an isolated test daemon. The TUI must never open SQLite, Bluetooth, or
+  CoreAudio directly, and quitting it must not stop daemon-owned work.
 - The development-only `micflurry-hid-probe` must be built as the normal user. It may seize only the
   registered RC003 fingerprint and must exit after a bounded duration. Direct root runs use a native
   macOS administrator prompt. The LaunchDaemon feasibility test may install only the exact ad-hoc
   probe bundle and plist through the repository's dedicated scripts, and it must be uninstalled
   after testing. Never run the complete application as root.
+- Private distribution to a small trusted tester group may use the repository's ad-hoc-signed
+  traditional LaunchAgent/LaunchDaemon package instead of `SMAppService`. Its daemon and helper must
+  mutually pin the expected identifiers and build-specific CDHashes, install only the documented
+  exact paths, and retain native administrator authorization, Gatekeeper, and TCC approval. Keep the
+  Developer ID/notarized `SMAppService` route as the public-distribution design.
 - Treat filesystem access, host-service access, and administrator authorization as separate
   concerns. `/tmp` solves cache/state writes only; it does not grant CoreAudio, Bluetooth,
   Accessibility, HAL installation, or service-restart privileges.
@@ -158,6 +163,8 @@ installer; `sudo killall coreaudiod` is the faster development path.
   AudioServerPlugIn remains the upstream-derived C++ driver, and UI/control clients remain language
   independent. Preserve the current Rust Milestone 2 runtime as the hardware-validated behavioral
   reference until the Swift acceptance matrix in `docs/TODO-swift-core.md` passes.
+- Target the Swift core services and service host at Apple Silicon (`arm64`) and macOS 15 or later.
+  Intel and older macOS compatibility are outside the Swift migration scope.
 - Use `/Applications/MicFlurry.app` as the signed ServiceManagement host for the Swift LaunchAgent
   and LaunchDaemon even if no native UI is shipped. Core packages and public control contracts must
   not depend on TUI, web, or native UI concerns.

@@ -15,7 +15,6 @@ anyhow.workspace = true
 crossterm.workspace = true
 futures.workspace = true
 micflurry-control = { path = "../micflurry-control" }
-micflurry-core = { path = "../micflurry-core" }
 ratatui.workspace = true
 tokio.workspace = true
 tokio-stream.workspace = true

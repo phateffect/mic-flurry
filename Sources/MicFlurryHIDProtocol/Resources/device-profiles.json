@@ -1,0 +1,16 @@
+{
+  "schemaVersion": 1,
+  "profiles": [
+    {
+      "id": "rc003-v1",
+      "manufacturer": "MIOM",
+      "vendorID": 10007,
+      "productID": 12984,
+      "product": "小米语音遥控器",
+      "transport": "Bluetooth Low Energy",
+      "maximumInterfaces": 8,
+      "maximumReportBytes": 1024,
+      "capturePolicy": "all_interfaces_all_inputs"
+    }
+  ]
+}
