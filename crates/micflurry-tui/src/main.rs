@@ -4,7 +4,7 @@ use crossterm::{
     execute, terminal,
 };
 use futures::StreamExt;
-use micflurry_control::{ControlClient, Event, KeyboardAction, Status};
+use micflurry_control::{ControlClient, Event, KeyboardAction, SettingsChange, Status};
 use micflurry_core::{LocalControlClient, RuntimeOptions};
 use ratatui::{
     Terminal,
@@ -15,15 +15,25 @@ use ratatui::{
     widgets::{Block, Borders, Gauge, List, ListItem, ListState, Paragraph, Wrap},
 };
 use std::{
+    fs::OpenOptions,
     io::{self, Stdout},
     path::PathBuf,
+    sync::{Arc, Mutex, MutexGuard},
 };
+use tracing_subscriber::fmt::MakeWriter;
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    let log_writer = std::env::var_os("MICFLURRY_LOG")
+        .map(PathBuf::from)
+        .map(|path| FileMakeWriter::open(&path))
+        .transpose()?;
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
-        .with_writer(io::stderr)
+        .with_ansi(log_writer.is_none())
+        .with_writer(
+            log_writer.map_or_else(|| FileMakeWriter::stderr().boxed(), FileMakeWriter::boxed),
+        )
         .init();
     let options = parse_options()?;
     let (client, runtime) = micflurry_core::start(options).await?;
@@ -31,6 +41,54 @@ async fn main() -> Result<()> {
     client.shutdown().await;
     runtime.await.context("runtime task failed")?;
     result
+}
+
+#[derive(Clone)]
+struct FileMakeWriter {
+    file: Arc<Mutex<Box<dyn io::Write + Send>>>,
+}
+
+impl FileMakeWriter {
+    fn open(path: &PathBuf) -> Result<Self> {
+        let file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+            .with_context(|| format!("open log file {}", path.display()))?;
+        Ok(Self {
+            file: Arc::new(Mutex::new(Box::new(file))),
+        })
+    }
+
+    fn stderr() -> Self {
+        Self {
+            file: Arc::new(Mutex::new(Box::new(io::stderr()))),
+        }
+    }
+
+    fn boxed(self) -> tracing_subscriber::fmt::writer::BoxMakeWriter {
+        tracing_subscriber::fmt::writer::BoxMakeWriter::new(self)
+    }
+}
+
+struct FileWriterGuard<'a>(MutexGuard<'a, Box<dyn io::Write + Send>>);
+
+impl io::Write for FileWriterGuard<'_> {
+    fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+        self.0.write(buffer)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.0.flush()
+    }
+}
+
+impl<'a> MakeWriter<'a> for FileMakeWriter {
+    type Writer = FileWriterGuard<'a>;
+
+    fn make_writer(&'a self) -> Self::Writer {
+        FileWriterGuard(self.file.lock().expect("log writer lock poisoned"))
+    }
 }
 
 fn parse_options() -> Result<RuntimeOptions> {
@@ -84,11 +142,11 @@ async fn event_loop(
 ) -> Result<()> {
     let mut app = App {
         status: client.status().await?,
+        input_gain_db: client.settings().await?.input_gain_db,
         ..App::default()
     };
     let mut runtime_events = client.subscribe();
     let mut terminal_events = EventStream::new();
-    client.scan().await.ok();
     loop {
         terminal.draw(|frame| draw(frame, &mut app))?;
         tokio::select! {
@@ -98,21 +156,33 @@ async fn event_loop(
                 if key.kind != KeyEventKind::Press { continue; }
                 match key.code {
                     KeyCode::Char('q') => break,
-                    KeyCode::Char('s') => { client.scan().await.ok(); }
+                    KeyCode::Char('s') => {
+                        let client = client.clone();
+                        tokio::spawn(async move { let _ = client.refresh_devices().await; });
+                    }
                     KeyCode::Up => app.previous(),
                     KeyCode::Down => app.next(),
                     KeyCode::Enter => {
                         if let Some(device) = app.status.devices.get(app.selected)
-                            && let Err(error) = client.pair_and_connect(device.id.clone()).await
+                            && device.support.is_supported()
                         {
-                            app.message = error.to_string();
+                            let client = client.clone();
+                            let device = device.id.clone();
+                            tokio::spawn(async move {
+                                let _ = client.connect(device).await;
+                            });
                         }
                     }
-                    KeyCode::Char('d') => { client.disconnect().await.ok(); }
+                    KeyCode::Char('d') => {
+                        let client = client.clone();
+                        tokio::spawn(async move { let _ = client.release().await; });
+                    }
                     KeyCode::Char('r') => {
                         let result = if app.status.recording.active { client.stop_recording().await } else { client.start_recording().await };
                         if let Err(error) = result { app.message = error.to_string(); }
                     }
+                    KeyCode::Char('<' | ',') => adjust_gain(&client, &mut app, -1.0).await,
+                    KeyCode::Char('>' | '.') => adjust_gain(&client, &mut app, 1.0).await,
                     KeyCode::Char(' ') => post(&client, &mut app, KeyboardAction::PlayPause).await,
                     KeyCode::Char('[') => post(&client, &mut app, KeyboardAction::Previous).await,
                     KeyCode::Char(']') => post(&client, &mut app, KeyboardAction::Next).await,
@@ -133,17 +203,36 @@ async fn post(client: &LocalControlClient, app: &mut App, action: KeyboardAction
     }
 }
 
+async fn adjust_gain(client: &LocalControlClient, app: &mut App, delta_db: f32) {
+    let gain_db = (app.input_gain_db + delta_db).clamp(-24.0, 24.0);
+    match client
+        .set_settings(SettingsChange {
+            input_gain_db: Some(gain_db),
+            ..SettingsChange::default()
+        })
+        .await
+    {
+        Ok(settings) => {
+            app.input_gain_db = settings.input_gain_db;
+            app.message = format!("Input gain: {:+.0} dB", settings.input_gain_db);
+        }
+        Err(error) => app.message = error.to_string(),
+    }
+}
+
 #[derive(Default)]
 struct App {
     status: Status,
     selected: usize,
     message: String,
+    input_gain_db: f32,
 }
 
 impl App {
     fn apply(&mut self, event: Event) {
         match event {
             Event::Status(status) => self.status = status,
+            Event::Attaching { active, .. } => self.status.attaching = active,
             Event::Error { message } => self.message = message,
             Event::RecordingStarted { path } => self.message = format!("Recording {path}"),
             Event::RecordingStopped { path, .. } => self.message = format!("Saved {path}"),
@@ -190,8 +279,8 @@ fn draw(frame: &mut ratatui::Frame<'_>, app: &mut App) {
                     .add_modifier(Modifier::BOLD),
             ),
             Span::raw(format!("  {:?} · {connection}", app.status.bluetooth)),
-            if app.status.pairing {
-                Span::styled(" · pairing", Style::default().fg(Color::Yellow))
+            if app.status.attaching {
+                Span::styled(" · attaching", Style::default().fg(Color::Yellow))
             } else {
                 Span::raw("")
             },
@@ -209,12 +298,14 @@ fn draw(frame: &mut ratatui::Frame<'_>, app: &mut App) {
         .devices
         .iter()
         .map(|device| {
-            let profile = if device.supports_atvv {
-                "ATVV"
+            let profile = if device.support.is_supported() {
+                device.support.model().unwrap_or("supported")
+            } else if device.supports_atvv {
+                "unsupported ATVV"
             } else {
                 "other"
             };
-            let known = if device.known { " · paired" } else { "" };
+            let known = if device.known { " · remembered" } else { "" };
             ListItem::new(format!(
                 "{}  [{} · {} dBm{}]",
                 device.name,
@@ -245,12 +336,24 @@ fn draw(frame: &mut ratatui::Frame<'_>, app: &mut App) {
 
     let audio = &app.status.audio;
     let audio_text = format!(
-        "Stream: {}\nSource: {} Hz → {} Hz\nDecoded: {} samples\nDropped: {} samples\nRecording: {}",
+        "Stream: {} · Duration: {}\nSource: {} Hz → {} Hz\nGain: {:+.0} dB\nATVV: {} · stream {} · extends {}\nDecoded: {} samples\nDropped: {} samples\nStop reason: {} · Recording: {}",
         if audio.active { "active" } else { "idle" },
+        format_duration(audio.session_duration_ms),
         audio.source_rate_hz.unwrap_or_default(),
         audio.output_rate_hz,
+        app.input_gain_db,
+        audio
+            .protocol_version
+            .map_or_else(|| "unknown".into(), format_atvv_version),
+        audio
+            .stream_id
+            .map_or_else(|| "-".into(), |id| format!("0x{id:02x}")),
+        audio.mic_extends_sent,
         audio.decoded_frames,
         audio.dropped_frames,
+        audio
+            .last_stop_reason
+            .map_or_else(|| "-".into(), format_stop_reason),
         if app.status.recording.active {
             format!("{} samples", app.status.recording.sample_count)
         } else {
@@ -289,6 +392,44 @@ fn draw(frame: &mut ratatui::Frame<'_>, app: &mut App) {
         details[1],
     );
 
-    frame.render_widget(Paragraph::new(" q quit · s scan · ↑/↓ select · enter pair/connect · d disconnect · r record · space/[ ]/-/+/m keys ")
+    frame.render_widget(Paragraph::new(" q quit · s refresh macOS · ↑/↓ select · enter attach · d release · r record · </> gain · space/[ ]/-/+/m keys ")
         .style(Style::default().fg(Color::DarkGray)).block(Block::default().borders(Borders::ALL)), rows[3]);
+}
+
+fn format_atvv_version(version: u16) -> String {
+    format!("{}.{}", version >> 8, version & 0xff)
+}
+
+fn format_duration(duration_ms: u64) -> String {
+    let total_seconds = duration_ms / 1_000;
+    format!(
+        "{:02}:{:02}.{:01}",
+        total_seconds / 60,
+        total_seconds % 60,
+        (duration_ms % 1_000) / 100
+    )
+}
+
+fn format_stop_reason(reason: u8) -> String {
+    let name = match reason {
+        0x00 => "mic close",
+        0x02 => "button release",
+        0x04 => "new stream",
+        0x08 => "transfer timeout",
+        0x10 => "notifications disabled",
+        _ => "other",
+    };
+    format!("0x{reason:02x} {name}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn formats_session_duration_to_tenths() {
+        assert_eq!(format_duration(0), "00:00.0");
+        assert_eq!(format_duration(60_080), "01:00.0");
+        assert_eq!(format_duration(125_987), "02:05.9");
+    }
 }

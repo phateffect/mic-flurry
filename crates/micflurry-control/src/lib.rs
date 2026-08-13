@@ -12,7 +12,7 @@ pub struct Status {
     pub bluetooth: BluetoothState,
     pub devices: Vec<Device>,
     pub connected_device: Option<DeviceId>,
-    pub pairing: bool,
+    pub attaching: bool,
     pub audio: AudioStatus,
     pub recording: RecordingStatus,
     pub last_error: Option<String>,
@@ -23,7 +23,7 @@ pub struct Status {
 pub enum BluetoothState {
     #[default]
     Idle,
-    Scanning,
+    Refreshing,
     Unavailable,
 }
 
@@ -44,16 +44,45 @@ pub struct Device {
     pub known: bool,
     pub connected: bool,
     pub supports_atvv: bool,
+    /// Records whether the peripheral matches `MicFlurry`'s verified device registry.
+    pub support: DeviceSupport,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DeviceSupport {
+    Unsupported,
+    Supported { model: String },
+}
+
+impl DeviceSupport {
+    #[must_use]
+    pub const fn is_supported(&self) -> bool {
+        matches!(self, Self::Supported { .. })
+    }
+
+    #[must_use]
+    pub fn model(&self) -> Option<&str> {
+        match self {
+            Self::Supported { model } => Some(model),
+            Self::Unsupported => None,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
 pub struct AudioStatus {
     pub active: bool,
+    pub session_duration_ms: u64,
     pub source_rate_hz: Option<u32>,
     pub output_rate_hz: u32,
     pub level_dbfs: Option<f32>,
     pub decoded_frames: u64,
     pub dropped_frames: u64,
+    pub protocol_version: Option<u16>,
+    pub stream_id: Option<u8>,
+    pub mic_extends_sent: u64,
+    pub last_stop_reason: Option<u8>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
@@ -67,6 +96,7 @@ pub struct RecordingStatus {
 pub struct Settings {
     pub injection_device_uid: String,
     pub output_rate_hz: u32,
+    pub input_gain_db: f32,
     pub recording_directory: String,
     pub auto_record: bool,
 }
@@ -75,6 +105,7 @@ pub struct Settings {
 pub struct SettingsChange {
     pub injection_device_uid: Option<String>,
     pub output_rate_hz: Option<u32>,
+    pub input_gain_db: Option<f32>,
     pub recording_directory: Option<String>,
     pub auto_record: Option<bool>,
 }
@@ -95,7 +126,7 @@ pub enum KeyboardAction {
 pub enum Event {
     Status(Status),
     DeviceDiscovered { device: Device },
-    Pairing { device: DeviceId, active: bool },
+    Attaching { device: DeviceId, active: bool },
     Connected { device: DeviceId },
     Disconnected { device: DeviceId },
     AudioStarted { rate_hz: u32 },
@@ -123,9 +154,9 @@ pub trait ControlClient: Clone + Send + Sync + 'static {
     async fn status(&self) -> Result<Status>;
     async fn settings(&self) -> Result<Settings>;
     async fn set_settings(&self, change: SettingsChange) -> Result<Settings>;
-    async fn scan(&self) -> Result<()>;
-    async fn pair_and_connect(&self, device: DeviceId) -> Result<()>;
-    async fn disconnect(&self) -> Result<()>;
+    async fn refresh_devices(&self) -> Result<()>;
+    async fn connect(&self, device: DeviceId) -> Result<()>;
+    async fn release(&self) -> Result<()>;
     async fn start_recording(&self) -> Result<()>;
     async fn stop_recording(&self) -> Result<()>;
     async fn keyboard_action(&self, action: KeyboardAction) -> Result<()>;

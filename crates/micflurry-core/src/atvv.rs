@@ -11,6 +11,16 @@ pub const GET_CAPS: [u8; 6] = [0x0a, 0x01, 0x00, 0x00, 0x03, 0x03];
 pub const MIC_OPEN: [u8; 2] = [0x0c, 0x00];
 pub const MIC_CLOSE_ANY: [u8; 2] = [0x0d, 0xff];
 
+#[must_use]
+pub const fn mic_close(stream_id: u8) -> [u8; 2] {
+    [0x0d, stream_id]
+}
+
+#[must_use]
+pub const fn mic_extend(stream_id: u8) -> [u8; 2] {
+    [0x0e, stream_id]
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Codec {
     Adpcm8Khz,
@@ -235,6 +245,16 @@ mod tests {
                 step_index: 32,
             }
         );
+    }
+
+    #[test]
+    fn extends_the_negotiated_stream() {
+        assert_eq!(mic_extend(0x2a), [0x0e, 0x2a]);
+    }
+
+    #[test]
+    fn closes_the_negotiated_stream() {
+        assert_eq!(mic_close(0x2a), [0x0d, 0x2a]);
     }
 
     #[test]

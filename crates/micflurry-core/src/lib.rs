@@ -3,6 +3,7 @@
 pub mod atvv;
 mod audio;
 mod bluetooth;
+mod hid_identity;
 mod keyboard;
 mod recording;
 mod resample;

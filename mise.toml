@@ -4,13 +4,20 @@ pre-commit = "latest"
 rust = "1.91.0"
 worktrunk = "latest"
 
+[tasks.prepare-btleplug]
+description = "Export the pinned btleplug submodule and apply the MicFlurry macOS patch"
+run = "./scripts/prepare-btleplug.sh"
+
 [tasks.rust-fmt]
+depends = ["prepare-btleplug"]
 run = "cargo fmt --all -- --check"
 
 [tasks.rust-test]
+depends = ["prepare-btleplug"]
 run = "cargo test --workspace"
 
 [tasks.rust-clippy]
+depends = ["prepare-btleplug"]
 run = "cargo clippy --workspace --all-targets -- -D warnings"
 
 [tasks.rust-check]
@@ -18,6 +25,8 @@ depends = ["rust-fmt", "rust-test", "rust-clippy"]
 
 [tasks.micflurry]
 description = "Run the development TUI with sandbox-writable state"
+depends = ["prepare-btleplug"]
+env = { MICFLURRY_LOG = "/tmp/micflurry-dev.log", RUST_LOG = "micflurry_core=debug,micflurry=info" }
 run = "cargo run -p micflurry-tui -- --database /tmp/micflurry-dev.db"
 
 [tasks.verify-asr]

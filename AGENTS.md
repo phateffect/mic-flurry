@@ -62,6 +62,14 @@ When updating BlackHole:
 Do not copy upstream source into this repository or replace the submodule with a merged upstream
 history.
 
+`btleplug` follows the same unmodified-submodule strategy at `upstream/btleplug`. MicFlurry's macOS
+extension lives only in `patches/btleplug-macos-connected.patch`; it adds retrieval of peripherals
+already connected to macOS through CoreBluetooth's public API. `scripts/prepare-btleplug.sh` exports
+the pinned revision into `.build/btleplug` and applies the patch for Cargo. Never edit or commit
+generated `.build/btleplug` content or changes inside the submodule. Run
+`./scripts/check-btleplug-patch.sh` when changing the submodule pointer or patch, and commit those two
+changes together.
+
 ## Build and packaging
 
 - `scripts/build-driver.sh` exports a clean submodule snapshot, applies the patch in `.build`, builds
@@ -108,6 +116,8 @@ installer; `sudo killall coreaudiod` is the faster development path.
 - Repo builds and Rust tests must write inside the repository. Compiler/module caches that tools
   insist on placing outside the workspace must use a MicFlurry-specific directory under `/tmp`;
   never redirect a broad home directory or shared system cache.
+- Use the `mise` Rust tasks so the pinned `btleplug` source is prepared in `.build` before Cargo
+  resolves the workspace.
 - Use `mise run verify-asr` instead of invoking the Swift verifier directly. It puts Swift and Clang
   module caches under `/tmp`. CoreAudio device access can still require running this task in the
   host context because a filesystem-writable sandbox may expose an empty HAL device list.

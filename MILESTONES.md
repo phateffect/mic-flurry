@@ -1,8 +1,8 @@
 # MicFlurry milestones
 
-This document records the planned architecture and delivery sequence discussed on 2026-08-11. It
-describes future work, not necessarily the behavior of the current release. `README.md` and
-`AGENTS.md` remain authoritative for what is implemented today.
+This document records the planned architecture and delivery sequence discussed on 2026-08-11 and
+refined on 2026-08-12. It describes future work, not necessarily the behavior of the current
+release. `README.md` and `AGENTS.md` remain authoritative for what is implemented today.
 
 ## Product boundary
 
@@ -71,7 +71,7 @@ database directly.
 ```text
 micflurryd
 ├── SQLite       settings, known devices, recording metadata, schema version
-├── memory       connection, scan, stream, level, and error state
+├── memory       connection, refresh, stream, level, and error state
 ├── Keychain     future credentials or secrets
 └── files        optional recorded audio payloads
 ```
@@ -100,8 +100,9 @@ domain operations.
 trait ControlClient {
     async fn status(&self) -> Status;
     async fn set_settings(&self, change: SettingsChange);
-    async fn scan(&self);
+    async fn refresh_devices(&self);
     async fn connect(&self, device: DeviceId);
+    async fn release(&self);
     async fn subscribe(&self) -> EventStream;
 }
 ```
@@ -114,10 +115,10 @@ exposed over the network.
 Initial method groups are expected to cover:
 
 - `system.hello` and `system.status`
-- Bluetooth scan, device listing, pairing, connect, and disconnect
+- system-connected Bluetooth device refresh, listing, attachment, and release
 - settings get and set
 - recording start, stop, and list
-- event subscription for device, pairing, audio statistics, recording, and errors
+- event subscription for device, attachment, audio statistics, recording, and errors
 
 The API has its own negotiated major version, independent of the application version and the
 JSON-RPC `2.0` field. Within API v1, changes are additive, clients ignore unknown fields and events,
@@ -141,7 +142,9 @@ Grow into this layout only as each milestone needs it:
 
 ```text
 upstream/BlackHole/                   unmodified Git submodule
+upstream/btleplug/                    unmodified Git submodule
 patches/mic-flurry.patch              minimal driver patch
+patches/btleplug-macos-connected.patch minimal CoreBluetooth retrieval patch
 scripts/                              driver build and verification
 packaging/                            package payload and installer scripts
 
@@ -173,6 +176,41 @@ This is a future migration. The current driver, package receipt, scripts, instal
 published v0.1 release still use `io.phateffect.MicFlurry`. Change and validate all affected
 identifiers together when the restructuring starts.
 
+## Real-time BLE audio sources
+
+MicFlurry targets live short-form voice sessions: audio reaches the Mac while capture is still in
+progress rather than being uploaded after recording finishes. A typical session is about 10 seconds
+and the hard product limit is 60 seconds. The runtime, and owned firmware where applicable, must
+enforce that limit independently of the UI or a final button-release event.
+
+The planned hardware sources are separate GATT profiles, not interchangeable codec modes:
+
+```text
+小米语音遥控器 -> Google ATVV 1.0 -> IMA ADPCM decoder -------.
+                                                               |-> timestamped mono PCM
+ESP32-S3 -> MicFlurry Voice GATT v1 -> Opus reassembly/decoder-'
+                                                                    -> streaming resampler
+                                                                    -> MicFlurry_2_UID
+```
+
+- The first validated hardware is reported by IOHID as `小米语音遥控器`, with manufacturer `MIOM`,
+  vendor ID `10007`, and product ID `12984`. MicFlurry keys support on that fingerprint, not on a
+  user-editable name or an unverified retail model label.
+- The owned ESP32-S3 source will use an independent MicFlurry service and Opus protocol. Google
+  ATVV 1.0 does not define Opus, so the custom device must not advertise ATVV UUIDs or treat a
+  vendor-specific `0x04` codec bit as part of the ATVV 1.0 contract.
+- Both profiles share only the decoded PCM pipeline, CoreAudio output, recording, persistence, and
+  control/status abstractions. ATVV control bytes, ADPCM sync state, Opus fragments, and codec-
+  specific loss recovery remain behind their profile boundaries.
+- This is a real-time best-effort microphone path. Audio queues are bounded and may drop old audio
+  to preserve the time domain; do not add recorder-style ACK, resume, commit, or historical replay.
+
+The evidence, protocol corrections, proposed ESP framing, and acceptance criteria are recorded in
+`docs/realtime-ble-audio-options.md`. In particular, ATVV `MIC_OPEN` uses the one-byte consumption
+mode (`0x00` for real-time playback), not a codec byte. Sessions use the negotiated stream ID and
+periodically send `MIC_EXTEND`. On the validated remote, five successful extend writes did not move
+the device's 60-second stop; that is an observed firmware boundary rather than a host-enforced limit.
+
 ## Delivery sequence
 
 ### Milestone 0 — loopback driver baseline (complete)
@@ -190,24 +228,64 @@ identifiers together when the restructuring starts.
 - Keep both endpoints mono and validate the existing supported sample rates and ASR conversion path.
 - Migrate component identifiers together if this milestone is selected for the naming transition.
 
-### Milestone 2 — foreground Rust vertical slice (implemented; hardware validation pending)
+### Milestone 2 — foreground Rust vertical slice (implemented; registered hardware validated)
 
 - Add the Rust workspace and keep runtime logic independent of Ratatui.
 - Initially run the runtime and TUI in one foreground process using a `LocalControlClient` backed by
   in-process calls or Tokio channels; do not require a daemon, socket, launchd, or `.app` yet.
-- Implement Bluetooth discovery and pairing plus predefined GATT profiles, beginning with ATVV.
+- Enumerate ATVV peripherals already connected by macOS, correlate CoreBluetooth and IOHID identity,
+  and attach only registered hardware fingerprints. Pairing remains a macOS responsibility.
 - Decode and resample received audio, then write it to the CoreAudio injection endpoint.
 - Support the required CGEvent keyboard actions.
 - Save optional recordings as files and store settings and metadata in SQLite.
-- Show pairing, connection, audio, recording, and error status in the TUI.
+- Show refresh, attachment, audio, recording, and error status in the TUI.
 
 This milestone proves the complete audio path before adding process lifecycle and IPC complexity.
 
 The foreground workspace, local control abstraction, ATVV v1 implementation, CoreAudio writer,
 CGEvent actions, SQLite persistence, WAV recording, and Ratatui status UI are implemented. Automated
-tests cover protocol parsing/decoding, resampling, persistence, and the in-process client. A physical
-ATVV remote and an installed driver are still required to complete the device-level validation in
-`docs/milestone-2.md`; this repository does not claim that hardware validation from automated tests.
+tests cover protocol parsing/decoding, resampling, persistence, and the in-process client. Physical
+validation on the registered `小米语音遥控器` fingerprint established:
+
+- `CAPS_RESP`: ATVV 1.00, codec mask `0x02` (16 kHz ADPCM), interaction model `3`, frame size `120`,
+  extra configuration `0`, reserved `0`, and no firmware payload;
+- HTT `AUDIO_START` reason `3`, 16 kHz audio and a negotiated nonzero stream ID;
+- intelligible WAV and visible-device audio with +12 dB default input gain;
+- stable short sessions, repeated start/stop, release/reattach, and process restart while preserving
+  the macOS-owned Bluetooth connection;
+- an exactly 60-second device stop while the button remained held, even after five successful
+  `MIC_EXTEND` writes at ten-second intervals. The runtime now independently closes any active stream
+  at the same 60-second product limit instead of relying on this firmware behavior.
+
+This validates the registered fingerprint and observed 16 kHz path, not every device marketed under
+an RC003/ARN9 label and not arbitrary ATVV peripherals. ATT MTU/notification-size characterization,
+an 8 kHz source, and deliberate loss followed by `AUDIO_SYNC` remain open validation work.
+
+### Milestone 2.1 — ESP32-S3 Opus source (planned)
+
+- Freeze a versioned MicFlurry Voice GATT v1 before writing firmware. Use independent 128-bit UUIDs
+  with Capabilities/State, Control, and Audio characteristics; do not extend or impersonate ATVV.
+- Start with 16 kHz mono SInt16 capture, Opus VOIP, 20 ms frames, 20 kbps CBR, bounded packet sizes,
+  notifications for audio, and writes with response for low-rate control.
+- Carry a random nonzero session ID, per-Opus-packet sequence, and MTU-safe fragments. The proposed
+  v1 audio fragment header is eight bytes and uses 16-bit session/sequence fields because a session
+  is capped at 60 seconds.
+- Reassemble strictly in order, reject malformed or cross-session fragments, use Opus PLC for
+  sequence gaps, and never wait for an application-layer audio retransmission.
+- Build separate bounded I2S capture, Opus encode, and BLE notification stages. On congestion, drop
+  the oldest complete Opus packet and expose capture, queue, notification, gap, jitter, and
+  CoreAudio-underrun statistics.
+- Require bonding and link encryption before audio subscription or start. Provide a physical pairing
+  window, visible capture indication, and an explicit bond-reset path appropriate to the hardware.
+- Validate both default-MTU fragmentation and enlarged-MTU single-notification operation, typical
+  10-second and hard-limit 60-second streams, and at least 100 consecutive start/stop sessions.
+- Keep fixed-ratio streaming resampling for this short-session scope while measuring queue depth at
+  60 seconds. Add adaptive clock recovery only if measurements require it or the product later adds
+  long-running continuous capture.
+
+This milestone is complete only when an ESP32-S3 prototype streams live audio into the current
+foreground Rust runtime and a consumer records intelligible audio from visible `MicFlurry`. It does
+not include reliable stored-recording transfer, OTA, a daemon, or a custom driver IPC path.
 
 ### Milestone 3 — independent daemon and public local API
 

@@ -21,6 +21,10 @@ mise run rust-check
 mise run micflurry
 ```
 
+These tasks first export the pinned, unmodified `upstream/btleplug` submodule into
+`.build/btleplug` and apply `patches/btleplug-macos-connected.patch`. Use the `mise` entry points
+after a fresh clone instead of invoking Cargo before that generated dependency exists.
+
 Useful diagnostic flags are passed after `--`:
 
 ```bash
@@ -32,6 +36,11 @@ mise run micflurry -- --database /tmp/micflurry-test.db
 `--no-audio` keeps discovery, persistence, and the UI available without an installed driver.
 `--no-bluetooth` is useful for local control and database testing.
 
+The `mise run micflurry` development task appends structured runtime diagnostics to
+`/tmp/micflurry-dev.log`. Set `MICFLURRY_LOG` to choose another file, or run the binary without that
+variable to keep logs on stderr. Avoid running multiple TUI instances against the same remote when
+interpreting protocol logs because CoreBluetooth can deliver the same notification to each process.
+
 ## Permissions and prerequisites
 
 1. Build and install `MicFlurry.driver` using `INSTALL.md`. The runtime resolves the hidden output by
@@ -41,27 +50,36 @@ mise run micflurry -- --database /tmp/micflurry-test.db
 3. Give that terminal Accessibility access before using keyboard actions. MicFlurry posts ordinary
    CGEvent key presses and never changes the permission itself.
 
-CoreBluetooth performs the system pairing exchange when connecting to protected characteristics.
-The TUI calls this operation “pair/connect” because CoreBluetooth does not expose a separate pairing
-method on macOS.
+At startup MicFlurry first uses the public `retrieveConnectedPeripheralsWithServices:` API to list
+system-connected ATVV peripherals, including a remote connected through macOS before MicFlurry has
+ever seen it. Users always pair and connect the remote in macOS Bluetooth Settings; MicFlurry never
+scans or initiates system pairing. A read-only IOHID lookup joins each CoreBluetooth UUID to the HID
+manufacturer and VID/PID. The current supported hardware fingerprint is `MIOM`, vendor ID `10007`,
+product ID `12984`; its observed IOHID product name is `小米语音遥控器`. User-visible names are
+display-only and may be renamed. The last successful UUID is persisted only to choose among multiple
+supported, already-connected remotes. Releasing or quitting MicFlurry stops its notification task
+without disconnecting a link macOS owned first.
 
 ## Controls
 
 | Key | Action |
 | --- | --- |
-| `s` | scan for BLE devices |
+| `s` | refresh ATVV devices currently connected by macOS |
 | Up / Down | select a device |
-| Return | pair/connect and negotiate ATVV |
-| `d` | close the ATVV stream and disconnect |
+| Return | attach to the selected supported device and negotiate ATVV |
+| `d` | close the ATVV stream and release MicFlurry's attachment |
 | `r` | start or stop a mono Float32 WAV recording |
+| `<` / `>` | decrease or increase input gain by 1 dB |
 | Space | post play/pause (Space) through CGEvent |
 | `[` / `]` | post previous/next (Left/Right Arrow) through CGEvent |
 | `-` / `+` | post macOS volume down/up key codes through CGEvent |
 | `m` | post the macOS mute key code through CGEvent |
 | `q` | stop the foreground runtime and quit |
 
-The UI displays scan/pair/connection state, source and output rates, decoded and dropped samples,
-the input level (limited to ten updates per second), recording state, and the latest error.
+The UI displays refresh/attachment state, the active or most recently completed session duration,
+source and output rates, persisted input gain, decoded and dropped samples, the input level (limited
+to ten updates per second), recording state, and the latest error. The duration resets on
+`AUDIO_START`, advances while active, and freezes on `AUDIO_STOP` or disconnect.
 
 ## ATVV profile
 
@@ -75,35 +93,44 @@ The initial profile is Google Voice over BLE v1:
 | control | `AB5E0004-5A21-4F05-BC7D-AF01F617B664` | notify |
 
 After connection the host subscribes to audio and control and sends `GET_CAPS`. `START_SEARCH`
-causes `MIC_OPEN`; disconnect sends `MIC_CLOSE` for any stream. `AUDIO_START`, `AUDIO_STOP`, and
+causes `MIC_OPEN`; an active stream is extended every ten seconds with its negotiated stream ID,
+and release sends `MIC_CLOSE` for any stream. `AUDIO_START`, `AUDIO_STOP`, and
 `AUDIO_SYNC` drive decoder state. Both 8 kHz and 16 kHz codecs are supported, including dynamic rate
 changes. The decoder processes the high nibble first as required by ATVV and uses sync predictor and
 step-index values after packet loss.
+
+New databases default to +12 dB input gain because physical ATVV remotes commonly have low decoded
+levels. The persisted gain is limited to -24 through +24 dB and is applied to both CoreAudio output
+and Float32 WAV recordings.
 
 ## Persistent state
 
 By default SQLite is stored at `~/Library/Application Support/MicFlurry/micflurry.db`. It owns:
 
-- injection UID, output rate, recording directory, and automatic-recording setting;
+- injection UID, output rate, input gain, recording directory, and automatic-recording setting;
 - known-device identity and last-seen metadata;
+- the most recently connected device UUID used for macOS restoration;
 - recording path, device, rate, sample count, and timestamps;
 - the schema version through SQLite `user_version`.
 
 WAV files default to `~/Music/MicFlurry`. Clients use `ControlClient`; they do not access these
 tables directly.
 
-## Physical validation checklist
+## Physical validation
 
-Automated tests do not emulate CoreBluetooth or a HAL render cycle. Before declaring device-level
-validation complete, use an ATVV remote and verify:
+The registered `MIOM`/`10007`/`12984` fingerprint has been validated with the installed driver. It
+negotiated ATVV 1.00, 16 kHz ADPCM, interaction model 3 and a 120-byte audio frame; short sessions,
+repeated sessions, WAV capture, visible `MicFlurry` input, release/reattach, and fresh-process restore
+all passed. A held session stopped at 60 seconds in the remote firmware after five successful
+`MIC_EXTEND` commands, and a new session began after release and another press. The runtime also
+independently caps active sessions at 60 seconds and sends `MIC_CLOSE` with the negotiated stream ID.
 
-1. The scan identifies the remote as ATVV and Return completes the macOS pairing prompt.
-2. Assistant press produces `AUDIO_START`, a moving level meter, and no sustained dropped-sample
-   increase.
-3. A consumer recording from visible `MicFlurry` receives intelligible mono audio while the daemon
-   writes only to hidden `MicFlurry Internal`.
-4. Exercise both an 8 kHz and a 16 kHz remote/stream if available, including an `AUDIO_SYNC` rate
-   transition.
-5. Start and stop a recording; inspect its Float32 mono sample rate and confirm its SQLite metadata.
-6. Exercise every CGEvent action after granting Accessibility access.
-7. Disconnect, reconnect, restart the TUI, and confirm settings and known-device state persist.
+Automated tests still do not emulate CoreBluetooth or a HAL render cycle. The following expand the
+coverage beyond the currently registered 16 kHz device:
+
+1. Exercise an 8 kHz remote/stream and a deliberate `AUDIO_SYNC` rate transition.
+2. Record ATT MTU and notification-size distributions and inject a lost ADPCM notification before a
+   sync point.
+3. Exercise the host-owned cutoff against a supported device whose firmware would otherwise run
+   beyond 60 seconds.
+4. Repeat the lifecycle checks for every newly registered hardware fingerprint.
