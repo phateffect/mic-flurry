@@ -1,13 +1,13 @@
 use anyhow::{Context, Result};
+use control::{
+    AudioStatus, ControlClient, DeviceInfo, Event, HidStatus, SettingsChange, SocketControlClient,
+    Status,
+};
 use crossterm::{
     event::{Event as TerminalEvent, EventStream, KeyCode, KeyEventKind},
     execute, terminal,
 };
 use futures::StreamExt;
-use micflurry_control::{
-    AudioStatus, ControlClient, DeviceInfo, Event, HidStatus, SettingsChange, SocketControlClient,
-    Status,
-};
 use ratatui::{
     Terminal,
     backend::CrosstermBackend,
@@ -23,6 +23,8 @@ use std::{
     sync::{Arc, Mutex, MutexGuard},
 };
 use tracing_subscriber::fmt::MakeWriter;
+
+mod control;
 
 #[tokio::main]
 async fn main() -> Result<()> {

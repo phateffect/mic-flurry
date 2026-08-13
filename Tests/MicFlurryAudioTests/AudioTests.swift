@@ -25,7 +25,7 @@ private func loadAudioFixtures() throws -> AudioFixtures {
   return try JSONDecoder().decode(AudioFixtures.self, from: Data(contentsOf: fixture))
 }
 
-@Test func sharedResamplingFixturesMatchRustBehavior() throws {
+@Test func resamplingFixturesMatchAcceptedBehavior() throws {
   for fixture in try loadAudioFixtures().resampling {
     var resampler = LinearResampler(
       inputRate: fixture.inputRate,

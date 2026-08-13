@@ -2,6 +2,10 @@
 
 set -euo pipefail
 
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=scripts/lib/project.sh
+source "${script_dir}/lib/project.sh"
+
 if [[ $# -lt 1 || $# -gt 2 ]]; then
     echo "Usage: $0 <version> [build-number]" >&2
     exit 2
@@ -9,29 +13,16 @@ fi
 
 version="$1"
 build_number="${2:-1}"
-if [[ ! "${version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-    echo "Version must use MAJOR.MINOR.PATCH." >&2
-    exit 2
-fi
-if [[ ! "${build_number}" =~ ^[1-9][0-9]*$ ]]; then
-    echo "Build number must be a positive integer." >&2
-    exit 2
-fi
+micflurry_validate_version "${version}"
+micflurry_validate_build_number "${build_number}"
 
-script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-project_dir="$(cd "${script_dir}/.." && pwd)"
+project_dir="$(micflurry_repo_root)"
 bundle_path="${project_dir}/build/MicFlurry.app"
 release_dir="${project_dir}/.build/arm64-apple-macosx/release"
 template_dir="${project_dir}/packaging/swift-app"
 
 cd "${project_dir}"
-env \
-    CLANG_MODULE_CACHE_PATH=/tmp/micflurry-swift-clang-module-cache \
-    SWIFT_MODULECACHE_PATH=/tmp/micflurry-swift-module-cache \
-    swift build -c release --arch arm64 --disable-sandbox \
-        --cache-path /tmp/micflurry-swiftpm-cache \
-        --config-path /tmp/micflurry-swiftpm-config \
-        --security-path /tmp/micflurry-swiftpm-security
+"${script_dir}/swift-package.sh" release
 
 rm -rf "${bundle_path}"
 install -d -m 755 \

@@ -46,9 +46,7 @@ rsync -a \
 [[ -f "${staging_dir}/Source/LICENSE" ]]
 [[ -f "${staging_dir}/Source/Package.swift" ]]
 [[ -f "${staging_dir}/Source/patches/mic-flurry.patch" ]]
-[[ -f "${staging_dir}/Source/patches/btleplug-macos-connected.patch" ]]
 [[ -f "${staging_dir}/Source/upstream/BlackHole/LICENSE" ]]
-[[ -f "${staging_dir}/Source/upstream/btleplug/Cargo.toml" ]]
 
 codesign --verify --deep --strict --verbose=2 "${staging_dir}/MicFlurry.app"
 ditto -c -k --norsrc --noextattr --noacl --keepParent "${staging_dir}" "${archive_path}"

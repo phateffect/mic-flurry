@@ -6,7 +6,7 @@
 > 的设备身份。实际测试设备由 IOHID 报告为 `小米语音遥控器`，受支持指纹是 manufacturer
 > `MIOM`、vendor ID `10007`、product ID `12984`。该设备的 16 kHz ATVV 实时链路已经完成
 > MicFlurry 真机验收；runtime 也会在 60 秒独立发送 `MIC_CLOSE`。实现状态以
-> `docs/milestone-2.md` 为准。保留本文其余内容作为设计和实现前审计记录。
+> `docs/TODO-swift-core.md` 为准。保留本文其余内容作为设计和实现前审计记录。
 
 ## 范围与语境
 
@@ -33,7 +33,7 @@
 1. **两条路径都可行，但不是同一种协议的两个 codec。** RC003 应作为 ATVV profile；
    ESP32-S3/Opus 应作为独立的 MicFlurry profile。它们只在解码后 PCM、重采样、CoreAudio
    输出、录音和状态上复用公共管线。
-2. **受支持指纹已经完成 Milestone 2 真机闭环。** 当前 Rust runtime 可从 macOS 已连接
+2. **受支持指纹已经完成 Milestone 2 真机闭环。** 历史 Rust 原型可从 macOS 已连接
    设备枚举、按 IOHID 指纹筛选、协商 ATVV、解码并写入 `MicFlurry Internal`。
 3. **长期可控硬件路径应是 ESP32-S3/Opus。** 它可以明确规定帧长、序号、分片、统计和
    安全策略，音质/带宽比也优于 ADPCM；代价是固件、麦克风模拟前端、电源、协议和长期
