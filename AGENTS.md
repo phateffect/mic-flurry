@@ -1,6 +1,6 @@
 # MicFlurry project agreements
 
-This file records the project decisions agreed as of 2026-08-11. Agents working in this repository
+This file records the project decisions agreed as of 2026-08-13. Agents working in this repository
 must preserve these decisions unless the user explicitly changes them.
 
 ## Product goal
@@ -64,7 +64,8 @@ history.
 
 `btleplug` follows the same unmodified-submodule strategy at `upstream/btleplug`. MicFlurry's macOS
 extension lives only in `patches/btleplug-macos-connected.patch`; it adds retrieval of peripherals
-already connected to macOS through CoreBluetooth's public API. `scripts/prepare-btleplug.sh` exports
+already connected to macOS through CoreBluetooth's public API and updates btleplug's macOS MTU value
+from CoreBluetooth's maximum write length. `scripts/prepare-btleplug.sh` exports
 the pinned revision into `.build/btleplug` and applies the patch for Cargo. Never edit or commit
 generated `.build/btleplug` content or changes inside the submodule. Run
 `./scripts/check-btleplug-patch.sh` when changing the submodule pointer or patch, and commit those two
@@ -124,6 +125,11 @@ installer; `sudo killall coreaudiod` is the faster development path.
 - Use `mise run micflurry -- <arguments>` for agent smoke tests. Its default SQLite database is
   `/tmp/micflurry-dev.db`; pass a later `--database PATH` to override it. Do not use the production
   database in `~/Library/Application Support` for automated tests.
+- The development-only `micflurry-hid-probe` must be built as the normal user. It may seize only the
+  registered RC003 fingerprint and must exit after a bounded duration. Direct root runs use a native
+  macOS administrator prompt. The LaunchDaemon feasibility test may install only the exact ad-hoc
+  probe bundle and plist through the repository's dedicated scripts, and it must be uninstalled
+  after testing. Never run the complete application as root.
 - Treat filesystem access, host-service access, and administrator authorization as separate
   concerns. `/tmp` solves cache/state writes only; it does not grant CoreAudio, Bluetooth,
   Accessibility, HAL installation, or service-restart privileges.
@@ -140,10 +146,30 @@ installer; `sudo killall coreaudiod` is the faster development path.
   `MicFlurry_2_UID`.
 - Runtime settings, known devices, and recording metadata live in SQLite. Optional recordings are
   mono Float32 WAV files. Clients must use the control abstraction rather than opening SQLite.
+- The foreground runtime reads the standard BLE Device Information Service and observes all IOHID
+  input values from the exact attached hardware UUID. Observation is non-exclusive by default.
+  Exclusive IOHID seizure and CGEvent forwarding require the explicit `--seize-hid` option and must
+  release the device on detach, disconnect, failure, and shutdown.
+- Milestone 3 keeps `micflurryd` as a per-user LaunchAgent. The final exclusive HID path may add a
+  separate root LaunchDaemon named `io.phateffect.MicFlurry.hid-helper`; it owns only IOHID seizure
+  and reports raw input to `micflurryd` over a private authenticated XPC boundary. Bluetooth,
+  CoreAudio, SQLite, mapping policy, and CGEvent output remain in the per-user daemon.
+- Implement the Milestone 3 core processes, `micflurryd` and `micflurry-hid-helper`, in Swift. The
+  AudioServerPlugIn remains the upstream-derived C++ driver, and UI/control clients remain language
+  independent. Preserve the current Rust Milestone 2 runtime as the hardware-validated behavioral
+  reference until the Swift acceptance matrix in `docs/TODO-swift-core.md` passes.
+- Use `/Applications/MicFlurry.app` as the signed ServiceManagement host for the Swift LaunchAgent
+  and LaunchDaemon even if no native UI is shipped. Core packages and public control contracts must
+  not depend on TUI, web, or native UI concerns.
+- The planned remapping path is seizure-only. Do not add an IOHID-plus-CGEvent suppression fallback
+  unless the user explicitly changes this decision. Seize every IOHID interface matching the
+  registered RC003 fingerprint and capture every raw report and decoded usage; do not require a
+  per-button usage allowlist at the helper boundary.
 - Additional GATT profiles may be added behind the same runtime/control boundaries after ATVV
   hardware validation; do not couple profile-specific code to the TUI.
 
-Do not begin BLE/GATT or custom driver IPC work unless the user explicitly advances the roadmap.
+Do not add custom driver IPC or move PCM away from standard CoreAudio unless the user explicitly
+changes the product contract.
 
 ## Licensing and branding
 

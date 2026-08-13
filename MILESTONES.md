@@ -1,7 +1,7 @@
 # MicFlurry milestones
 
 This document records the planned architecture and delivery sequence discussed on 2026-08-11 and
-refined on 2026-08-12. It describes future work, not necessarily the behavior of the current
+refined through 2026-08-13. It describes future work, not necessarily the behavior of the current
 release. `README.md` and `AGENTS.md` remain authoritative for what is implemented today.
 
 ## Product boundary
@@ -14,8 +14,9 @@ MicFlurry Core
 └── micflurryd             Bluetooth, audio, persistence, and control service
 
 Optional clients
-├── CLI / TUI              Rust
-├── tray app               Swift
+├── CLI / TUI              any language
+├── tray / native app      any language
+├── web UI                 any language
 └── third-party clients    any language that can use a Unix socket
 ```
 
@@ -29,12 +30,16 @@ all components, but it installs the active HAL plug-in outside the app bundle:
 ```text
 MicFlurry.pkg
 ├── /Library/Audio/Plug-Ins/HAL/MicFlurry.driver
-├── per-user micflurryd service
-└── /Applications/MicFlurry.app             optional Swift tray client
+└── /Applications/MicFlurry.app                     signed service host
+    ├── per-user Swift micflurryd service
+    ├── root Swift micflurry-hid-helper
+    └── optional native UI
 ```
 
-Headless installation of the driver and daemon must remain possible. TUI and tray packaging may be
-offered separately once maintaining multiple artifacts is useful.
+Headless operation of the driver and daemon must remain possible. The `.app` is the modern
+ServiceManagement host and does not imply that a native UI must run or even be shipped. TUI, CLI,
+web, and native UI packaging may be offered separately once maintaining multiple artifacts is
+useful.
 
 ## Runtime architecture
 
@@ -58,6 +63,57 @@ visible MicFlurry input -> consuming application
 The BlackHole-derived driver does not need a custom Unix socket. The daemon writes decoded PCM to a
 CoreAudio output endpoint, and the driver exposes the same frames on the microphone input. The
 control socket carries commands, configuration, status, and events; it does not carry PCM.
+
+### HID privilege boundary
+
+The final background service is split by privilege and login-session ownership:
+
+```text
+TUI / tray / third-party client
+             │ public per-user JSON-RPC socket
+             ▼
+micflurryd                                           per-user LaunchAgent
+├── Bluetooth / ATVV / CoreAudio
+├── SQLite settings and button mappings
+├── CGEvent output
+└── HID helper client
+             │ private authenticated XPC
+             ▼
+micflurry-hid-helper                                 root LaunchDaemon
+└── exclusive IOHID capture of registered hardware
+```
+
+Do not run all of `micflurryd` as root. Bluetooth, CoreAudio, CGEvent output, state ownership, and the
+public control API belong to the logged-in user's service. The root helper is a narrow mechanism for
+opening the remote exclusively, reading its input, and releasing it. It must not own mappings,
+persist settings, access BLE/audio, or expose a general-purpose HID API.
+
+The planned remapping path is seizure-only. There is no CGEvent suppression fallback in the current
+plan: if the helper is unavailable or cannot seize every interface, remapping is unavailable and the
+failure is reported to clients. Seizure is atomic across every IOHID interface matching the stable
+registered RC003 fingerprint (`MIOM`, vendor `0x2717`, product `0x32b8`). Input capture is not
+restricted to a known-button list; every raw report and decoded usage is forwarded so new or unknown
+RC003 commands remain observable. Mapping policy remains in `micflurryd`.
+
+The bounded probes have confirmed that this RC003 exposes one matching keyboard interface and can be
+seized both as a root child of an Input-Monitoring-approved Terminal and as a root system
+LaunchDaemon with its own manually granted Input Monitoring identity. Both paths received complete
+raw reports and decoded usages and released the interface normally; the remote's original macOS
+actions stopped during direct seizure and returned immediately afterward. The LaunchDaemon run
+captured all 13 observed non-empty reports, including OK, and exited zero. Hardware observation also
+confirmed that no original RC003 action reached macOS during the LaunchDaemon seizure and that normal
+behavior returned immediately on exit. A plain root administrator shell remained
+`kIOReturnNotPermitted`, proving that root without TCC consent is insufficient.
+
+The remaining product risk is packaging and lifecycle rather than RC003 seizure feasibility. The
+final helper still requires Developer ID signing, notarization, `SMAppService`, authenticated XPC,
+lease/crash release, and fast-user-switching validation. The ad-hoc legacy LaunchDaemon test does not
+replace those release requirements.
+
+The current LaunchDaemon test is deliberately not a release implementation. With no Developer ID
+identity available, it uses a root-owned legacy LaunchDaemon and an ad-hoc-signed app-like bundle to
+measure system-launchd TCC behavior. `SMAppService` requires a properly signed and notarized bundle
+for LaunchDaemons, so the final helper must repeat the test after release signing exists.
 
 Programs that only need to produce PCM should use the standard CoreAudio endpoint. If a non-CoreAudio
 streaming API is ever required, design it later as a separate binary audio protocol rather than
@@ -144,23 +200,36 @@ Grow into this layout only as each milestone needs it:
 upstream/BlackHole/                   unmodified Git submodule
 upstream/btleplug/                    unmodified Git submodule
 patches/mic-flurry.patch              minimal driver patch
-patches/btleplug-macos-connected.patch minimal CoreBluetooth retrieval patch
+patches/btleplug-macos-connected.patch CoreBluetooth retrieval and macOS MTU reporting patch
 scripts/                              driver build and verification
 packaging/                            package payload and installer scripts
 
-Cargo.toml                            Rust workspace, added with runtime work
+Cargo.toml                            current Rust reference runtime and clients
 crates/
-├── micflurry-core/                   Bluetooth, audio, recording, domain logic
+├── micflurry-core/                   current hardware-validated reference runtime
 ├── micflurry-control/                client abstraction and protocol DTOs
-├── micflurry-daemon/                 daemon executable and socket server
+├── micflurry-hid-probe/              bounded development feasibility probe
 └── micflurry-tui/                    terminal client
 
-apps/MicFlurryTray/                   future Swift tray application
+Package.swift                          future Swift core packages and executables
+Sources/
+├── MicFlurryDomain/                  core state and language-independent DTOs
+├── MicFlurryATVV/                    ATVV protocol and audio decode
+├── MicFlurryAudio/                   CoreAudio adapter and streaming buffer
+├── MicFlurryBluetooth/               CoreBluetooth adapter
+├── MicFlurryStorage/                 SQLite ownership and migrations
+├── MicFlurryControl/                 public local JSON-RPC service
+├── MicFlurryHIDProtocol/             private authenticated XPC contract
+├── micflurryd/                        per-user core service
+└── micflurry-hid-helper/              root-only IOHID seizure service
+
+apps/MicFlurry/                        signed service host; native UI optional
 docs/control-api.md                   added when the socket API is made public
+docs/TODO-swift-core.md                executable migration and acceptance plan
 ```
 
-Core and control crates must not depend on terminal or Swift UI concerns. Exact crate boundaries can
-be adjusted when implementation reveals a cleaner dependency graph; the process and ownership
+Core packages and the control contract must not depend on a particular UI. Exact module boundaries
+can be adjusted when implementation reveals a cleaner dependency graph; the process and ownership
 boundaries above should remain stable.
 
 ## Planned component identities
@@ -168,9 +237,10 @@ boundaries above should remain stable.
 Reserve these identifiers for the component split:
 
 - Driver: `io.phateffect.MicFlurry.driver`
-- Rust daemon / launchd service: `io.phateffect.MicFlurry.daemon`
+- Swift daemon / launchd service: `io.phateffect.MicFlurry.daemon`
+- Root HID helper: `io.phateffect.MicFlurry.hid-helper`
 - Rust TUI: `io.phateffect.MicFlurry.tui`
-- Swift tray app: `io.phateffect.MicFlurry.tray`
+- Service host / optional native UI: `io.phateffect.MicFlurry.app`
 
 This is a future migration. The current driver, package receipt, scripts, installed bundle, and
 published v0.1 release still use `io.phateffect.MicFlurry`. Change and validate all affected
@@ -237,13 +307,16 @@ the device's 60-second stop; that is an observed firmware boundary rather than a
   and attach only registered hardware fingerprints. Pairing remains a macOS responsibility.
 - Decode and resample received audio, then write it to the CoreAudio injection endpoint.
 - Support the required CGEvent keyboard actions.
+- Read standard BLE Device Information, monitor every IOHID value from the attached fingerprint,
+  and allow explicit exclusive seizure for forwarding known remote buttons through CGEvent.
 - Save optional recordings as files and store settings and metadata in SQLite.
 - Show refresh, attachment, audio, recording, and error status in the TUI.
 
 This milestone proves the complete audio path before adding process lifecycle and IPC complexity.
 
 The foreground workspace, local control abstraction, ATVV v1 implementation, CoreAudio writer,
-CGEvent actions, SQLite persistence, WAV recording, and Ratatui status UI are implemented. Automated
+CGEvent actions, Device Information, IOHID observation/optional seizure, SQLite persistence, WAV
+recording, and Ratatui status UI are implemented. Automated
 tests cover protocol parsing/decoding, resampling, persistence, and the in-process client. Physical
 validation on the registered `小米语音遥控器` fingerprint established:
 
@@ -258,8 +331,11 @@ validation on the registered `小米语音遥控器` fingerprint established:
   at the same 60-second product limit instead of relying on this firmware behavior.
 
 This validates the registered fingerprint and observed 16 kHz path, not every device marketed under
-an RC003/ARN9 label and not arbitrary ATVV peripherals. ATT MTU/notification-size characterization,
-an 8 kHz source, and deliberate loss followed by `AUDIO_SYNC` remain open validation work.
+an RC003/ARN9 label and not arbitrary ATVV peripherals. The runtime now exposes ATT MTU,
+notification-size distributions, sync frame gaps, and opt-in notification loss injection. Software
+tests cover loss recovery, an 8 kHz sync transition, and the host cutoff policy; an 8 kHz physical
+source, deliberate-loss recovery on hardware, and a device that runs beyond 60 seconds remain open
+validation work.
 
 ### Milestone 2.1 — ESP32-S3 Opus source (planned)
 
@@ -289,22 +365,30 @@ not include reliable stored-recording transfer, OTA, a daemon, or a custom drive
 
 ### Milestone 3 — independent daemon and public local API
 
-- Extract `micflurryd` from the foreground runtime and run it independently of all UIs.
+- Implement `micflurryd` and `micflurry-hid-helper` as the Swift core described in
+  [docs/TODO-swift-core.md](docs/TODO-swift-core.md). Preserve the current Rust runtime as the
+  hardware-validated behavioral reference until the Swift acceptance matrix passes.
+- Run `micflurryd` as a per-user LaunchAgent, not as root.
 - Implement `SocketControlClient` and the versioned Unix socket protocol described above.
 - Convert the TUI into a normal socket client with no direct SQLite, Bluetooth, or CoreAudio access.
+- After the root probe validates exclusive capture, add the narrow root `micflurry-hid-helper` and
+  its private authenticated XPC protocol. It seizes all interfaces matching the registered RC003
+  fingerprint atomically and streams all raw reports/usages; `micflurryd` owns mapping and CGEvent
+  output. Do not add a suppression fallback in this milestone.
 - Add launchd lifecycle integration, API documentation, schemas, and reference clients.
-- Verify simultaneous TUI and third-party clients, reconnect behavior, migrations, permissions, and
-  that UI exit never stops active daemon work.
+- Verify simultaneous TUI and third-party clients, reconnect behavior, migrations, permissions,
+  helper crash/lease release, fast user switching, and that UI exit never stops active daemon work.
 
-### Milestone 4 — Swift tray and product packaging
+### Milestone 4 — optional clients and product packaging
 
-- Build a Swift tray app using the same public control API; do not duplicate daemon business logic.
-- Package driver, independent daemon, and optional tray into a coherent installer while preserving
-  headless installation.
+- Build optional TUI, CLI, web, or native clients using the same public control API; do not duplicate
+  daemon business logic.
+- Package the driver, independent core services, service host, and any optional clients into coherent
+  artifacts while preserving headless operation.
 - Add upgrade and uninstall handling for the HAL plug-in, launchd service, database, and application.
 - Pursue Developer ID signing, notarization, and low-friction Homebrew distribution only when the
   project is ready to pay for and maintain the required Apple release credentials.
 
-The tray is intentionally deferred until the foreground Rust path and daemon boundary are stable.
-This keeps the first implementation inspectable and avoids making `.app` lifecycle decisions before
-the service behavior is proven.
+Polished clients are intentionally deferred until the Swift daemon/helper boundary and public API
+are stable. The signed `.app` service host is packaging infrastructure and must not couple the core
+to a particular UI.

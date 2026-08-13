@@ -62,6 +62,14 @@ index c0f42aa..03a4707 100644
      ReadResult(Vec<u8>),
      ReadRssi(i16),
      Connected,
+@@ -168,6 +169,7 @@ pub enum CoreBluetoothReply {
+ #[derive(Debug)]
+ pub enum PeripheralEventInternal {
+     Disconnected,
++    Mtu(u16),
+     Notification(Uuid, Uuid, Vec<u8>),
+     ManufacturerData(u16, Vec<u8>, i16),
+     ServiceData(HashMap<Uuid, Vec<u8>>, i16),
 @@ -438,6 +439,10 @@ pub enum CoreBluetoothMessage {
          filter: ScanFilter,
      },
@@ -73,6 +81,21 @@ index c0f42aa..03a4707 100644
      ConnectDevice {
          peripheral_uuid: Uuid,
          future: CoreBluetoothReplyStateShared,
+@@ -738,5 +744,14 @@ impl CoreBluetoothInternal {
+                 .get_mut(&peripheral_uuid)
+                 .expect("If we're here we should have an ID");
++            let maximum_write_length = unsafe {
++                peripheral.peripheral.maximumWriteValueLengthForType(
++                    CBCharacteristicWriteType::CBCharacteristicWriteWithoutResponse,
++                )
++            };
++            let att_mtu = u16::try_from(maximum_write_length.saturating_add(3)).unwrap_or(u16::MAX);
++            let _ = peripheral
++                .event_sender
++                .try_send(PeripheralEventInternal::Mtu(att_mtu));
+             peripheral
+                 .connected_future_state
+                 .take()
 @@ -1396,6 +1401,9 @@ impl CoreBluetoothInternal {
                      },
                      CoreBluetoothMessage::StartScanning{filter} => self.start_discovery(filter),
@@ -83,7 +106,7 @@ index c0f42aa..03a4707 100644
                      CoreBluetoothMessage::ConnectDevice{peripheral_uuid, future} => {
                          trace!("got connectdevice msg!");
                          self.connect_peripheral(peripheral_uuid, future);
-@@ -1448,6 +1456,36 @@ impl CoreBluetoothInternal {
+@@ -1448,6 +1456,48 @@ impl CoreBluetoothInternal {
          fut.lock()
              .unwrap()
              .set_reply(CoreBluetoothReply::AdapterState(state))
@@ -110,9 +133,21 @@ index c0f42aa..03a4707 100644
 +            unsafe {
 +                peripheral.setDelegate(Some(ProtocolObject::from_ref(&*self.delegate)));
 +            }
-+            let identifier = unsafe { peripheral.identifier() };
-+            identifiers.push(nsuuid_to_uuid(&identifier));
++            let ns_identifier = unsafe { peripheral.identifier() };
++            let identifier = nsuuid_to_uuid(&ns_identifier);
++            let maximum_write_length = unsafe {
++                peripheral.maximumWriteValueLengthForType(
++                    CBCharacteristicWriteType::CBCharacteristicWriteWithoutResponse,
++                )
++            };
++            let att_mtu = u16::try_from(maximum_write_length.saturating_add(3)).unwrap_or(u16::MAX);
++            identifiers.push(identifier);
 +            self.on_discovered_peripheral(peripheral, None).await;
++            if let Some(peripheral) = self.peripherals.get_mut(&identifier) {
++                let _ = peripheral
++                    .event_sender
++                    .try_send(PeripheralEventInternal::Mtu(att_mtu));
++            }
 +        }
 +        fut.lock()
 +            .unwrap()
@@ -120,3 +155,16 @@ index c0f42aa..03a4707 100644
      }
 
      fn start_discovery(&mut self, filter: ScanFilter) {
+diff --git a/src/corebluetooth/peripheral.rs b/src/corebluetooth/peripheral.rs
+index a077c7e..c4e583a 100644
+--- a/src/corebluetooth/peripheral.rs
++++ b/src/corebluetooth/peripheral.rs
+@@ -126,5 +126,8 @@ impl Peripheral {
+             loop {
+                 match event_receiver.next().await {
++                    Some(PeripheralEventInternal::Mtu(mtu)) => {
++                        shared.mtu.store(mtu, std::sync::atomic::Ordering::Relaxed);
++                    }
+                     Some(PeripheralEventInternal::Notification(uuid, service_uuid, data)) => {
+                         let notification = ValueNotification {
+                             uuid,

@@ -5,6 +5,7 @@ use crate::{
     },
     audio::{AudioSink, CoreAudioSink, DisconnectedSink},
     bluetooth::{Bluetooth, BluetoothEvent},
+    hid_identity::HidMonitor,
     keyboard,
     recording::Recording,
     resample::LinearResampler,
@@ -15,9 +16,11 @@ use async_trait::async_trait;
 use futures::StreamExt;
 use micflurry_control::{
     AudioStatus, BluetoothState, ControlClient, ControlError, DeviceId, Event, EventStream,
-    KeyboardAction, RecordingStatus, Settings, SettingsChange, Status,
+    HidCaptureMode, HidInput, KeyboardAction, KeyboardOutput, KeyboardSource,
+    NotificationSizeCount, RecordingStatus, Settings, SettingsChange, Status,
 };
 use std::{
+    collections::BTreeMap,
     path::PathBuf,
     time::{Duration, Instant},
 };
@@ -34,6 +37,9 @@ pub struct RuntimeOptions {
     pub database_path: Option<PathBuf>,
     pub disable_audio: bool,
     pub disable_bluetooth: bool,
+    pub seize_hid: bool,
+    /// One-based audio notification number to drop once per session for recovery validation.
+    pub drop_audio_notification: Option<u64>,
 }
 
 #[derive(Clone)]
@@ -56,22 +62,23 @@ pub async fn start(options: RuntimeOptions) -> Result<(LocalControlClient, JoinH
     let settings = store.settings()?;
     let (commands, command_receiver) = mpsc::channel(32);
     let (hardware_sender, hardware_receiver) = mpsc::channel(128);
+    let (hid_sender, hid_receiver) = mpsc::channel(128);
     let (events, _) = broadcast::channel(256);
     let client = LocalControlClient {
         commands,
         events: events.clone(),
     };
+    let channels = RuntimeChannels {
+        events,
+        hardware_sender,
+        hardware_receiver,
+        hid_sender,
+        hid_receiver,
+    };
     let handle = tokio::spawn(async move {
-        Runtime::new(
-            store,
-            settings,
-            options,
-            events,
-            hardware_sender,
-            hardware_receiver,
-        )
-        .run(command_receiver)
-        .await;
+        Runtime::new(store, settings, options, channels)
+            .run(command_receiver)
+            .await;
     });
     Ok((client, handle))
 }
@@ -152,6 +159,14 @@ enum Command {
     Shutdown(oneshot::Sender<()>),
 }
 
+struct RuntimeChannels {
+    events: broadcast::Sender<Event>,
+    hardware_sender: mpsc::Sender<BluetoothEvent>,
+    hardware_receiver: mpsc::Receiver<BluetoothEvent>,
+    hid_sender: mpsc::Sender<HidInput>,
+    hid_receiver: mpsc::Receiver<HidInput>,
+}
+
 struct Runtime {
     store: Store,
     settings: Settings,
@@ -159,6 +174,9 @@ struct Runtime {
     bluetooth: Option<Bluetooth>,
     hardware_sender: mpsc::Sender<BluetoothEvent>,
     hardware_receiver: mpsc::Receiver<BluetoothEvent>,
+    hid_sender: mpsc::Sender<HidInput>,
+    hid_receiver: mpsc::Receiver<HidInput>,
+    hid_monitor: Option<HidMonitor>,
     events: broadcast::Sender<Event>,
     audio_sink: Box<dyn AudioSink>,
     decoder: ImaAdpcmDecoder,
@@ -169,6 +187,9 @@ struct Runtime {
     active_stream_id: Option<u8>,
     audio_started_at: Option<Instant>,
     next_mic_extend: Option<Instant>,
+    notification_sizes: BTreeMap<u32, u64>,
+    next_audio_frame: Option<u16>,
+    keyboard_sequence: u64,
     options: RuntimeOptions,
 }
 
@@ -177,9 +198,7 @@ impl Runtime {
         store: Store,
         settings: Settings,
         options: RuntimeOptions,
-        events: broadcast::Sender<Event>,
-        hardware_sender: mpsc::Sender<BluetoothEvent>,
-        hardware_receiver: mpsc::Receiver<BluetoothEvent>,
+        channels: RuntimeChannels,
     ) -> Self {
         let (audio_sink, audio_error) = open_audio(&settings, options.disable_audio);
         let output_rate_hz = settings.output_rate_hz;
@@ -191,14 +210,22 @@ impl Runtime {
             ..Status::default()
         };
         status.last_error = audio_error;
+        status.hid.mode = if options.seize_hid {
+            HidCaptureMode::Seize
+        } else {
+            HidCaptureMode::Monitor
+        };
         Self {
             store,
             settings,
             status,
             bluetooth: None,
-            hardware_sender,
-            hardware_receiver,
-            events,
+            hardware_sender: channels.hardware_sender,
+            hardware_receiver: channels.hardware_receiver,
+            hid_sender: channels.hid_sender,
+            hid_receiver: channels.hid_receiver,
+            hid_monitor: None,
+            events: channels.events,
             audio_sink,
             decoder: ImaAdpcmDecoder::default(),
             resampler: LinearResampler::new(16_000, output_rate_hz),
@@ -210,6 +237,9 @@ impl Runtime {
             active_stream_id: None,
             audio_started_at: None,
             next_mic_extend: None,
+            notification_sizes: BTreeMap::new(),
+            next_audio_frame: None,
+            keyboard_sequence: 0,
             options,
         }
     }
@@ -239,6 +269,7 @@ impl Runtime {
                     if self.handle_command(command).await { break; }
                 }
                 Some(event) = self.hardware_receiver.recv() => self.handle_hardware(event).await,
+                Some(input) = self.hid_receiver.recv() => self.handle_hid_input(&input),
                 _ = ticker.tick() => {
                     if !self.enforce_session_limit().await {
                         self.extend_active_stream().await;
@@ -255,6 +286,7 @@ impl Runtime {
             }
         }
         let _ = self.finish_recording();
+        self.stop_hid_monitor().await;
         if let Some(bluetooth) = &mut self.bluetooth {
             let _ = bluetooth.write_command(&MIC_CLOSE_ANY).await;
             let _ = bluetooth.release().await;
@@ -293,7 +325,7 @@ impl Runtime {
                 if let Some(bluetooth) = &mut self.bluetooth {
                     bluetooth.release().await?;
                 }
-                self.mark_disconnected();
+                self.mark_disconnected().await;
             }
             self.status.devices.clear();
             return Ok(());
@@ -320,7 +352,7 @@ impl Runtime {
                 if let Some(bluetooth) = &mut self.bluetooth {
                     bluetooth.release().await?;
                 }
-                self.mark_disconnected();
+                self.mark_disconnected().await;
             }
             tracing::warn!(
                 event = "bluetooth_connected_devices_unsupported",
@@ -418,7 +450,7 @@ impl Runtime {
                 };
                 match result {
                     Ok(()) => {
-                        self.mark_disconnected();
+                        self.mark_disconnected().await;
                         let _ = reply.send(Ok(()));
                     }
                     Err(error) => {
@@ -437,7 +469,10 @@ impl Runtime {
                 let _ = reply.send(result);
             }
             Command::Keyboard(action, reply) => {
-                let _ = reply.send(keyboard::post(action).map_err(control_failed));
+                let result = self
+                    .post_keyboard(action, KeyboardSource::Tui)
+                    .map_err(control_failed);
+                let _ = reply.send(result);
             }
             Command::Shutdown(reply) => {
                 let _ = reply.send(());
@@ -484,7 +519,7 @@ impl Runtime {
                 let _ = bluetooth.write_command(&MIC_CLOSE_ANY).await;
                 bluetooth.release().await?;
             }
-            self.mark_disconnected();
+            self.mark_disconnected().await;
         }
         self.status.attaching = true;
         self.emit(Event::Attaching {
@@ -514,9 +549,12 @@ impl Runtime {
             active: false,
         });
         if result.is_err() && self.status.connected_device.is_some() {
-            self.mark_disconnected();
+            self.mark_disconnected().await;
         }
-        result
+        let device_info = result?;
+        self.status.device_info = Some(device_info);
+        self.start_hid_monitor(device).await;
+        Ok(())
     }
 
     async fn handle_hardware(&mut self, event: BluetoothEvent) {
@@ -534,7 +572,7 @@ impl Runtime {
             BluetoothEvent::Disconnected(device)
                 if self.status.connected_device.as_ref() == Some(&device) =>
             {
-                self.mark_disconnected();
+                self.mark_disconnected().await;
                 self.emit(Event::Disconnected { device });
             }
             _ => tracing::debug!(
@@ -544,58 +582,92 @@ impl Runtime {
         }
     }
 
+    async fn start_hid_monitor(&mut self, device: &DeviceId) {
+        self.stop_hid_monitor().await;
+        self.status.hid.mode = if self.options.seize_hid {
+            HidCaptureMode::Seize
+        } else {
+            HidCaptureMode::Monitor
+        };
+        self.status.hid.last_error = None;
+        match HidMonitor::start(&device.0, self.options.seize_hid, self.hid_sender.clone()).await {
+            Ok(monitor) => {
+                self.hid_monitor = Some(monitor);
+                self.status.hid.active = true;
+                tracing::info!(
+                    event = "hid_monitor_started",
+                    device_id = %device,
+                    seize = self.options.seize_hid,
+                    "monitoring remote IOHID input"
+                );
+            }
+            Err(error) => {
+                let message = format!("start IOHID monitor: {error:#}");
+                self.status.hid.active = false;
+                self.status.hid.last_error = Some(message.clone());
+                tracing::warn!(event = "hid_monitor_unavailable", error = %message, "remote HID input is unavailable");
+            }
+        }
+    }
+
+    async fn stop_hid_monitor(&mut self) {
+        if let Some(mut monitor) = self.hid_monitor.take() {
+            monitor.stop().await;
+        }
+        self.status.hid.active = false;
+    }
+
+    fn handle_hid_input(&mut self, input: &HidInput) {
+        tracing::debug!(
+            event = "hid_input",
+            sequence = input.sequence,
+            usage_page = input.usage_page,
+            usage = input.usage,
+            value = input.value,
+            action = ?input.mapped_action,
+            "received remote HID input"
+        );
+        push_recent(&mut self.status.hid.recent_inputs, input.clone(), 12);
+        self.emit(Event::HidInput {
+            input: input.clone(),
+        });
+        if self.options.seize_hid
+            && input.pressed
+            && let Some(action) = input.mapped_action
+            && let Err(error) = self.post_keyboard(action, KeyboardSource::Hid)
+        {
+            self.report_error(format!("forward seized HID input: {error:#}"));
+        }
+    }
+
+    fn post_keyboard(&mut self, action: KeyboardAction, source: KeyboardSource) -> Result<()> {
+        let result = keyboard::post(action);
+        self.keyboard_sequence += 1;
+        let output = KeyboardOutput {
+            sequence: self.keyboard_sequence,
+            source,
+            action,
+            succeeded: result.is_ok(),
+            error: result.as_ref().err().map(|error| format!("{error:#}")),
+        };
+        push_recent(&mut self.status.hid.recent_outputs, output.clone(), 12);
+        self.emit(Event::KeyboardOutput { output });
+        result
+    }
+
     async fn handle_atvv_control(&mut self, bytes: &[u8]) {
         match atvv::parse_control(bytes) {
             Ok(ControlMessage::AudioStart {
                 reason,
                 codec,
                 stream_id,
-            }) => {
-                tracing::info!(
-                    event = "atvv_audio_start",
-                    reason,
-                    codec = ?codec,
-                    sample_rate_hz = codec.sample_rate(),
-                    stream_id,
-                    "ATVV audio started"
-                );
-                self.codec = codec;
-                self.decoder.reset();
-                self.resampler
-                    .reconfigure(codec.sample_rate(), self.settings.output_rate_hz);
-                self.status.audio.active = true;
-                self.status.audio.session_duration_ms = 0;
-                self.active_stream_id = Some(stream_id);
-                self.audio_started_at = Some(Instant::now());
-                self.next_mic_extend = Some(Instant::now() + Duration::from_secs(10));
-                self.status.audio.source_rate_hz = Some(codec.sample_rate());
-                self.status.audio.stream_id = Some(stream_id);
-                self.status.audio.mic_extends_sent = 0;
-                self.status.audio.last_stop_reason = None;
-                if self.settings.auto_record && self.recording.is_none() {
-                    let _ = self.begin_recording();
-                }
-                self.emit(Event::AudioStarted {
-                    rate_hz: codec.sample_rate(),
-                });
-            }
+            }) => self.handle_audio_start(reason, codec, stream_id),
             Ok(ControlMessage::AudioSync {
                 codec,
+                frame,
                 predictor,
                 step_index,
-                ..
-            }) => {
-                if let Err(error) = self.decoder.synchronize(predictor, step_index) {
-                    self.report_error(error.to_string());
-                    return;
-                }
-                if codec != self.codec {
-                    self.codec = codec;
-                    self.resampler
-                        .reconfigure(codec.sample_rate(), self.settings.output_rate_hz);
-                    self.status.audio.source_rate_hz = Some(codec.sample_rate());
-                }
-            }
+            }) => self.handle_audio_sync(codec, frame, predictor, step_index),
             Ok(ControlMessage::AudioStop { reason }) => self.handle_audio_stop(reason),
             Ok(ControlMessage::StartSearch) => {
                 if let Some(bluetooth) = &self.bluetooth
@@ -626,10 +698,82 @@ impl Runtime {
                     &firmware_data,
                 );
                 self.status.audio.protocol_version = Some(version);
+                self.status.audio.negotiated_codecs = Some(codecs);
+                self.status.audio.interaction_model = Some(interaction_model);
+                self.status.audio.frame_size = Some(frame_size);
+                self.status.audio.extra_configuration = Some(extra_configuration);
             }
             Ok(ControlMessage::Unknown { .. }) => {}
             Err(error) => self.report_error(format!("invalid ATVV control notification: {error}")),
         }
+    }
+
+    fn handle_audio_start(&mut self, reason: u8, codec: Codec, stream_id: u8) {
+        tracing::info!(
+            event = "atvv_audio_start",
+            reason,
+            codec = ?codec,
+            sample_rate_hz = codec.sample_rate(),
+            stream_id,
+            "ATVV audio started"
+        );
+        self.codec = codec;
+        self.decoder.reset();
+        self.resampler
+            .reconfigure(codec.sample_rate(), self.settings.output_rate_hz);
+        self.status.audio.active = true;
+        self.status.audio.session_duration_ms = 0;
+        self.active_stream_id = Some(stream_id);
+        self.audio_started_at = Some(Instant::now());
+        self.next_mic_extend = Some(Instant::now() + Duration::from_secs(10));
+        self.status.audio.source_rate_hz = Some(codec.sample_rate());
+        self.status.audio.stream_id = Some(stream_id);
+        self.status.audio.mic_extends_sent = 0;
+        self.status.audio.last_stop_reason = None;
+        self.status.audio.notification_count = 0;
+        self.status.audio.notification_bytes = 0;
+        self.status.audio.notification_sizes.clear();
+        self.status.audio.audio_sync_count = 0;
+        self.status.audio.last_sync_frame = None;
+        self.status.audio.last_sync_gap_frames = None;
+        self.status.audio.injected_notification_drops = 0;
+        self.notification_sizes.clear();
+        self.next_audio_frame = None;
+        if self.settings.auto_record && self.recording.is_none() {
+            let _ = self.begin_recording();
+        }
+        self.emit(Event::AudioStarted {
+            rate_hz: codec.sample_rate(),
+        });
+    }
+
+    fn handle_audio_sync(&mut self, codec: Codec, frame: u16, predictor: i16, step_index: u8) {
+        if let Err(error) = self.decoder.synchronize(predictor, step_index) {
+            self.report_error(error.to_string());
+            return;
+        }
+        if codec != self.codec {
+            self.codec = codec;
+            self.resampler
+                .reconfigure(codec.sample_rate(), self.settings.output_rate_hz);
+            self.status.audio.source_rate_hz = Some(codec.sample_rate());
+        }
+        let gap = self
+            .next_audio_frame
+            .map(|expected| signed_frame_delta(frame, expected));
+        self.status.audio.audio_sync_count += 1;
+        self.status.audio.last_sync_frame = Some(frame);
+        self.status.audio.last_sync_gap_frames = gap;
+        self.next_audio_frame = Some(frame);
+        tracing::info!(
+            event = "atvv_audio_sync",
+            codec = ?codec,
+            frame,
+            gap_frames = ?gap,
+            predictor,
+            step_index,
+            "synchronized ATVV decoder state"
+        );
     }
 
     fn handle_audio_stop(&mut self, reason: u8) {
@@ -640,6 +784,7 @@ impl Runtime {
         self.active_stream_id = None;
         self.audio_started_at = None;
         self.next_mic_extend = None;
+        self.next_audio_frame = None;
         self.status.audio.last_stop_reason = Some(reason);
         if was_active {
             self.emit(Event::AudioStopped);
@@ -652,6 +797,28 @@ impl Runtime {
     fn handle_audio(&mut self, bytes: &[u8]) {
         if !self.status.audio.active {
             return;
+        }
+        self.status.audio.notification_count += 1;
+        self.status.audio.notification_bytes += bytes.len() as u64;
+        let size = u32::try_from(bytes.len()).unwrap_or(u32::MAX);
+        *self.notification_sizes.entry(size).or_default() += 1;
+        self.status.audio.notification_sizes = self
+            .notification_sizes
+            .iter()
+            .map(|(&bytes, &count)| NotificationSizeCount { bytes, count })
+            .collect();
+        if self.options.drop_audio_notification == Some(self.status.audio.notification_count) {
+            self.status.audio.injected_notification_drops += 1;
+            tracing::warn!(
+                event = "atvv_audio_notification_dropped",
+                notification = self.status.audio.notification_count,
+                bytes = bytes.len(),
+                "deliberately dropped ATVV audio notification for recovery validation"
+            );
+            return;
+        }
+        if let Some(frame) = &mut self.next_audio_frame {
+            *frame = frame.wrapping_add(1);
         }
         let decoded = self.decoder.decode(bytes);
         self.status.audio.decoded_frames += decoded.len() as u64;
@@ -746,7 +913,8 @@ impl Runtime {
         Ok(Some(path))
     }
 
-    fn mark_disconnected(&mut self) {
+    async fn mark_disconnected(&mut self) {
+        self.stop_hid_monitor().await;
         let was_active = self.status.audio.active;
         self.update_session_duration();
         if was_active {
@@ -761,11 +929,13 @@ impl Runtime {
             ));
         }
         self.status.connected_device = None;
+        self.status.device_info = None;
         self.status.audio.active = false;
         self.status.audio.stream_id = None;
         self.active_stream_id = None;
         self.audio_started_at = None;
         self.next_mic_extend = None;
+        self.next_audio_frame = None;
         for device in &mut self.status.devices {
             device.connected = false;
         }
@@ -778,7 +948,7 @@ impl Runtime {
 
     fn publish_status(&mut self) {
         self.update_session_duration();
-        self.emit(Event::Status(self.status.clone()));
+        self.emit(Event::Status(Box::new(self.status.clone())));
     }
 
     fn update_session_duration(&mut self) {
@@ -815,6 +985,7 @@ impl Runtime {
         self.active_stream_id = None;
         self.audio_started_at = None;
         self.next_mic_extend = None;
+        self.next_audio_frame = None;
         self.emit(Event::AudioStopped);
         if self.settings.auto_record
             && let Err(error) = self.finish_recording()
@@ -897,6 +1068,22 @@ fn bounded_session_duration_ms(elapsed: Duration) -> u64 {
     u64::try_from(elapsed.min(MAX_SESSION_DURATION).as_millis()).unwrap_or(60_000)
 }
 
+fn signed_frame_delta(actual: u16, expected: u16) -> i32 {
+    let forward = i32::from(actual.wrapping_sub(expected));
+    if forward <= i32::from(i16::MAX) {
+        forward
+    } else {
+        forward - 65_536
+    }
+}
+
+fn push_recent<T>(items: &mut Vec<T>, item: T, limit: usize) {
+    if items.len() == limit {
+        items.remove(0);
+    }
+    items.push(item);
+}
+
 fn stop_reason_name(reason: u8) -> &'static str {
     match reason {
         0x00 => "mic_close",
@@ -938,6 +1125,11 @@ fn log_audio_stop(reason: u8, audio: &AudioStatus) {
         stream_id = ?audio.stream_id,
         mic_extends_sent = audio.mic_extends_sent,
         decoded_samples = audio.decoded_frames,
+        notifications = audio.notification_count,
+        notification_bytes = audio.notification_bytes,
+        notification_sizes = ?audio.notification_sizes,
+        audio_syncs = audio.audio_sync_count,
+        injected_drops = audio.injected_notification_drops,
         "ATVV audio stopped"
     );
 }
@@ -946,6 +1138,30 @@ fn log_audio_stop(reason: u8, audio: &AudioStatus) {
 mod tests {
     use super::*;
 
+    fn test_runtime(options: RuntimeOptions) -> (Runtime, tempfile::TempDir) {
+        let directory = tempfile::tempdir().unwrap();
+        let store = Store::open(&directory.path().join("state.db")).unwrap();
+        let settings = store.settings().unwrap();
+        let (events, _) = broadcast::channel(32);
+        let (hardware_sender, hardware_receiver) = mpsc::channel(32);
+        let (hid_sender, hid_receiver) = mpsc::channel(32);
+        (
+            Runtime::new(
+                store,
+                settings,
+                options,
+                RuntimeChannels {
+                    events,
+                    hardware_sender,
+                    hardware_receiver,
+                    hid_sender,
+                    hid_receiver,
+                },
+            ),
+            directory,
+        )
+    }
+
     #[tokio::test]
     async fn local_client_round_trips_settings_without_hardware() {
         let directory = tempfile::tempdir().unwrap();
@@ -953,6 +1169,7 @@ mod tests {
             database_path: Some(directory.path().join("state.db")),
             disable_audio: true,
             disable_bluetooth: true,
+            ..RuntimeOptions::default()
         })
         .await
         .unwrap();
@@ -984,5 +1201,65 @@ mod tests {
             12_345
         );
         assert_eq!(bounded_session_duration_ms(Duration::from_secs(75)), 60_000);
+    }
+
+    #[tokio::test]
+    async fn tracks_injected_loss_sync_gap_and_eight_khz_transition() {
+        let (mut runtime, _directory) = test_runtime(RuntimeOptions {
+            disable_audio: true,
+            disable_bluetooth: true,
+            drop_audio_notification: Some(2),
+            ..RuntimeOptions::default()
+        });
+        runtime.handle_atvv_control(&[0x04, 0x03, 0x02, 0x2a]).await;
+        runtime
+            .handle_atvv_control(&[0x0a, 0x02, 0x00, 0x0a, 0x00, 0x00, 0x00])
+            .await;
+        runtime.handle_audio(&[0x17; 120]);
+        let decoded_after_first = runtime.status.audio.decoded_frames;
+        runtime.handle_audio(&[0x28; 120]);
+        assert_eq!(runtime.status.audio.decoded_frames, decoded_after_first);
+        runtime
+            .handle_atvv_control(&[0x0a, 0x01, 0x00, 0x0c, 0x01, 0x00, 0x08])
+            .await;
+
+        assert_eq!(runtime.status.audio.source_rate_hz, Some(8_000));
+        assert_eq!(runtime.status.audio.notification_count, 2);
+        assert_eq!(runtime.status.audio.notification_bytes, 240);
+        assert_eq!(runtime.status.audio.notification_sizes[0].bytes, 120);
+        assert_eq!(runtime.status.audio.notification_sizes[0].count, 2);
+        assert_eq!(runtime.status.audio.injected_notification_drops, 1);
+        assert_eq!(runtime.status.audio.audio_sync_count, 2);
+        assert_eq!(runtime.status.audio.last_sync_gap_frames, Some(1));
+    }
+
+    #[tokio::test]
+    async fn host_session_limit_closes_runtime_state_with_negotiated_stream() {
+        let (mut runtime, _directory) = test_runtime(RuntimeOptions {
+            disable_audio: true,
+            disable_bluetooth: true,
+            ..RuntimeOptions::default()
+        });
+        runtime.status.audio.active = true;
+        runtime.status.audio.stream_id = Some(0x2a);
+        runtime.active_stream_id = Some(0x2a);
+        runtime.audio_started_at = Some(
+            Instant::now()
+                .checked_sub(MAX_SESSION_DURATION)
+                .expect("the 60-second test duration is representable"),
+        );
+
+        assert!(runtime.enforce_session_limit().await);
+        assert!(!runtime.status.audio.active);
+        assert_eq!(runtime.status.audio.stream_id, None);
+        assert_eq!(runtime.status.audio.session_duration_ms, 60_000);
+        assert_eq!(runtime.status.audio.last_stop_reason, Some(0x00));
+    }
+
+    #[test]
+    fn frame_delta_wraps_and_reports_missing_notifications() {
+        assert_eq!(signed_frame_delta(12, 11), 1);
+        assert_eq!(signed_frame_delta(0, u16::MAX), 1);
+        assert_eq!(signed_frame_delta(u16::MAX, 0), -1);
     }
 }

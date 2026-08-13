@@ -4,7 +4,10 @@ use crossterm::{
     execute, terminal,
 };
 use futures::StreamExt;
-use micflurry_control::{ControlClient, Event, KeyboardAction, SettingsChange, Status};
+use micflurry_control::{
+    AudioStatus, ControlClient, DeviceInfo, Event, HidStatus, KeyboardAction, SettingsChange,
+    Status,
+};
 use micflurry_core::{LocalControlClient, RuntimeOptions};
 use ratatui::{
     Terminal,
@@ -12,7 +15,7 @@ use ratatui::{
     layout::{Constraint, Direction, Layout},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Gauge, List, ListItem, ListState, Paragraph, Wrap},
+    widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap},
 };
 use std::{
     fs::OpenOptions,
@@ -103,9 +106,20 @@ fn parse_options() -> Result<RuntimeOptions> {
             }
             "--no-audio" => options.disable_audio = true,
             "--no-bluetooth" => options.disable_bluetooth = true,
+            "--seize-hid" => options.seize_hid = true,
+            "--drop-audio-notification" => {
+                let value = arguments
+                    .next()
+                    .context("--drop-audio-notification requires a one-based number")?;
+                let number = value
+                    .parse::<u64>()
+                    .context("--drop-audio-notification must be a positive integer")?;
+                anyhow::ensure!(number > 0, "--drop-audio-notification must be at least 1");
+                options.drop_audio_notification = Some(number);
+            }
             "-h" | "--help" => {
                 println!(
-                    "MicFlurry foreground TUI\n\nUsage: micflurry [--database PATH] [--no-audio] [--no-bluetooth]"
+                    "MicFlurry foreground TUI\n\nUsage: micflurry [--database PATH] [--no-audio] [--no-bluetooth] [--seize-hid] [--drop-audio-notification N]\n\n--seize-hid exclusively captures the supported remote and forwards known buttons with CGEvent until MicFlurry releases the device."
                 );
                 std::process::exit(0);
             }
@@ -231,11 +245,17 @@ struct App {
 impl App {
     fn apply(&mut self, event: Event) {
         match event {
-            Event::Status(status) => self.status = status,
+            Event::Status(status) => self.status = *status,
             Event::Attaching { active, .. } => self.status.attaching = active,
             Event::Error { message } => self.message = message,
             Event::RecordingStarted { path } => self.message = format!("Recording {path}"),
             Event::RecordingStopped { path, .. } => self.message = format!("Saved {path}"),
+            Event::HidInput { input } => {
+                push_recent(&mut self.status.hid.recent_inputs, input, 12);
+            }
+            Event::KeyboardOutput { output } => {
+                push_recent(&mut self.status.hid.recent_outputs, output, 12);
+            }
             _ => {}
         }
         self.selected = self
@@ -261,6 +281,7 @@ fn draw(frame: &mut ratatui::Frame<'_>, app: &mut App) {
             Constraint::Length(3),
             Constraint::Min(8),
             Constraint::Length(7),
+            Constraint::Length(3),
             Constraint::Length(3),
         ])
         .split(frame.area());
@@ -291,7 +312,7 @@ fn draw(frame: &mut ratatui::Frame<'_>, app: &mut App) {
 
     let columns = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(55), Constraint::Percentage(45)])
+        .constraints([Constraint::Percentage(45), Constraint::Percentage(55)])
         .split(rows[1]);
     let devices: Vec<ListItem<'_>> = app
         .status
@@ -336,7 +357,7 @@ fn draw(frame: &mut ratatui::Frame<'_>, app: &mut App) {
 
     let audio = &app.status.audio;
     let audio_text = format!(
-        "Stream: {} · Duration: {}\nSource: {} Hz → {} Hz\nGain: {:+.0} dB\nATVV: {} · stream {} · extends {}\nDecoded: {} samples\nDropped: {} samples\nStop reason: {} · Recording: {}",
+        "{} · {} · {}→{} Hz · {:+.0} dB\nATVV {} · codec {} · model {} · frame {} B\nN: {} · {} B · sizes {}\nSync: {} · last {} · gap {} · lost {}\nPCM: {} · sink lost {} · stream {} · ext {}\nLevel: {:.1} dBFS · stop {} · rec {}",
         if audio.active { "active" } else { "idle" },
         format_duration(audio.session_duration_ms),
         audio.source_rate_hz.unwrap_or_default(),
@@ -346,11 +367,32 @@ fn draw(frame: &mut ratatui::Frame<'_>, app: &mut App) {
             .protocol_version
             .map_or_else(|| "unknown".into(), format_atvv_version),
         audio
+            .negotiated_codecs
+            .map_or_else(|| "-".into(), |value| format!("0x{value:02x}")),
+        audio
+            .interaction_model
+            .map_or_else(|| "-".into(), |value| value.to_string()),
+        audio
+            .frame_size
+            .map_or_else(|| "-".into(), |value| value.to_string()),
+        audio.notification_count,
+        audio.notification_bytes,
+        format_notification_sizes(audio),
+        audio.audio_sync_count,
+        audio
+            .last_sync_frame
+            .map_or_else(|| "-".into(), |value| value.to_string()),
+        audio
+            .last_sync_gap_frames
+            .map_or_else(|| "-".into(), |value| format!("{value:+}")),
+        audio.injected_notification_drops,
+        audio.decoded_frames,
+        audio.dropped_frames,
+        audio
             .stream_id
             .map_or_else(|| "-".into(), |id| format!("0x{id:02x}")),
         audio.mic_extends_sent,
-        audio.decoded_frames,
-        audio.dropped_frames,
+        audio.level_dbfs.unwrap_or(-96.0),
         audio
             .last_stop_reason
             .map_or_else(|| "-".into(), format_stop_reason),
@@ -366,34 +408,37 @@ fn draw(frame: &mut ratatui::Frame<'_>, app: &mut App) {
         columns[1],
     );
 
-    let level = audio.level_dbfs.unwrap_or(-96.0).clamp(-60.0, 0.0);
-    let meter = ((level + 60.0) / 60.0).clamp(0.0, 1.0);
-    let details = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Length(3), Constraint::Min(3)])
+    let diagnostics = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(45), Constraint::Percentage(55)])
         .split(rows[2]);
     frame.render_widget(
-        Gauge::default()
-            .block(
-                Block::default()
-                    .title(" Input level ")
-                    .borders(Borders::ALL),
-            )
-            .ratio(f64::from(meter))
-            .label(format!("{level:.1} dBFS"))
-            .gauge_style(Style::default().fg(Color::Green)),
-        details[0],
+        Paragraph::new(format_device_info(app.status.device_info.as_ref())).block(
+            Block::default()
+                .title(" Device info ")
+                .borders(Borders::ALL),
+        ),
+        diagnostics[0],
     );
+    frame.render_widget(
+        Paragraph::new(format_hid_status(&app.status.hid)).block(
+            Block::default()
+                .title(" HID input / CGEvent output ")
+                .borders(Borders::ALL),
+        ),
+        diagnostics[1],
+    );
+
     let error = app.status.last_error.as_deref().unwrap_or("none");
     frame.render_widget(
-        Paragraph::new(format!("Status: {}\nLast error: {error}", app.message))
+        Paragraph::new(format!("Status: {} · Error: {error}", app.message))
             .wrap(Wrap { trim: true })
             .block(Block::default().title(" Events ").borders(Borders::ALL)),
-        details[1],
+        rows[3],
     );
 
     frame.render_widget(Paragraph::new(" q quit · s refresh macOS · ↑/↓ select · enter attach · d release · r record · </> gain · space/[ ]/-/+/m keys ")
-        .style(Style::default().fg(Color::DarkGray)).block(Block::default().borders(Borders::ALL)), rows[3]);
+        .style(Style::default().fg(Color::DarkGray)).block(Block::default().borders(Borders::ALL)), rows[4]);
 }
 
 fn format_atvv_version(version: u16) -> String {
@@ -420,6 +465,87 @@ fn format_stop_reason(reason: u8) -> String {
         _ => "other",
     };
     format!("0x{reason:02x} {name}")
+}
+
+fn format_notification_sizes(audio: &AudioStatus) -> String {
+    if audio.notification_sizes.is_empty() {
+        return "-".into();
+    }
+    audio
+        .notification_sizes
+        .iter()
+        .map(|size| format!("{}×{}", size.bytes, size.count))
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+fn format_device_info(info: Option<&DeviceInfo>) -> String {
+    let Some(info) = info else {
+        return "Attach a supported remote to read GATT and IOHID identity.".into();
+    };
+    format!(
+        "GATT: {} · {}\nFW/HW/SW: {} / {} / {}\nSerial: {}\nHID: {} · {}\nVID:PID {}:{} · v{} · {} · MTU {}",
+        info.manufacturer_name.as_deref().unwrap_or("-"),
+        info.model_number.as_deref().unwrap_or("-"),
+        info.firmware_revision.as_deref().unwrap_or("-"),
+        info.hardware_revision.as_deref().unwrap_or("-"),
+        info.software_revision.as_deref().unwrap_or("-"),
+        info.serial_number.as_deref().unwrap_or("-"),
+        info.hid_manufacturer.as_deref().unwrap_or("-"),
+        info.hid_product.as_deref().unwrap_or("-"),
+        format_optional_hex(info.hid_vendor_id),
+        format_optional_hex(info.hid_product_id),
+        format_optional_hex(info.hid_version_number),
+        info.hid_transport.as_deref().unwrap_or("-"),
+        info.att_mtu
+            .map_or_else(|| "-".into(), |value| value.to_string()),
+    )
+}
+
+fn format_hid_status(hid: &HidStatus) -> String {
+    let mut lines = vec![format!(
+        "Mode: {:?} · {}{}",
+        hid.mode,
+        if hid.active { "active" } else { "inactive" },
+        hid.last_error
+            .as_ref()
+            .map_or_else(String::new, |error| format!(" · {error}"))
+    )];
+    lines.extend(hid.recent_inputs.iter().rev().take(2).map(|input| {
+        format!(
+            "IN #{:04} {:04x}/{:04x} {}={} {}{}",
+            input.sequence,
+            input.usage_page,
+            input.usage,
+            input.usage_name,
+            input.value,
+            if input.pressed { "press" } else { "release" },
+            input
+                .mapped_action
+                .map_or_else(String::new, |action| format!(" → {action:?}"))
+        )
+    }));
+    lines.extend(hid.recent_outputs.iter().rev().take(1).map(|output| {
+        format!(
+            "OUT #{:04} {:?} → {:?} {}",
+            output.sequence,
+            output.source,
+            output.action,
+            if output.succeeded { "sent" } else { "failed" }
+        )
+    }));
+    lines.join("\n")
+}
+
+fn format_optional_hex(value: Option<u32>) -> String {
+    value.map_or_else(|| "-".into(), |value| format!("0x{value:04x}"))
+}
+
+fn push_recent<T>(items: &mut Vec<T>, item: T, limit: usize) {
+    if items.len() == limit {
+        items.remove(0);
+    }
+    items.push(item);
 }
 
 #[cfg(test)]
