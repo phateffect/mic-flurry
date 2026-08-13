@@ -205,6 +205,9 @@ longer applies, refresh only `patches/mic-flurry.patch`; do not edit the submodu
   by the Swift core)
 - Milestone 3: Swift per-user daemon, Swift HID helper, local control API, and service host core
   implementation (complete; public Developer ID/notarization acceptance remains pending)
+- Milestone 4A: unified private-beta distribution, lifecycle acceptance, and GitHub Actions for
+  deterministic tests and unsigned/ad-hoc automatic packaging
+- Milestone 4B: optional polished clients and Developer ID/notarized public distribution
 
 The component boundaries, daemon/control API design, persistence decisions, and staged delivery plan
 are documented in [MILESTONES.md](MILESTONES.md).
