@@ -1,4 +1,38 @@
 [tools]
 gh = "latest"
 pre-commit = "latest"
+rust = "1.91.0"
 worktrunk = "latest"
+
+[tasks.prepare-btleplug]
+description = "Export the pinned btleplug submodule and apply the MicFlurry macOS patch"
+run = "./scripts/prepare-btleplug.sh"
+
+[tasks.rust-fmt]
+depends = ["prepare-btleplug"]
+run = "cargo fmt --all -- --check"
+
+[tasks.rust-test]
+depends = ["prepare-btleplug"]
+run = "cargo test --workspace"
+
+[tasks.rust-clippy]
+depends = ["prepare-btleplug"]
+run = "cargo clippy --workspace --all-targets -- -D warnings"
+
+[tasks.rust-check]
+depends = ["rust-fmt", "rust-test", "rust-clippy"]
+
+[tasks.micflurry]
+description = "Run the development TUI with sandbox-writable state"
+depends = ["prepare-btleplug"]
+env = { MICFLURRY_LOG = "/tmp/micflurry-dev.log", RUST_LOG = "micflurry_core=debug,micflurry=info" }
+run = "cargo run -p micflurry-tui -- --database /tmp/micflurry-dev.db"
+
+[tasks.verify-asr]
+description = "Verify installed CoreAudio endpoints using sandbox-writable compiler caches"
+env = {
+  CLANG_MODULE_CACHE_PATH = "/tmp/micflurry-clang-module-cache",
+  SWIFT_MODULECACHE_PATH = "/tmp/micflurry-swift-module-cache",
+}
+run = "./scripts/verify-asr-format.swift"

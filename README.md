@@ -87,6 +87,12 @@ differences: the USB transport type, the independent plug-in UUID, and output-ob
 the split mirror topology. Names, visibility, formats, and other customization are passed to
 `xcodebuild` by `scripts/build-driver.sh`.
 
+The Rust runtime uses the same upstream discipline for `btleplug`: the official source is pinned as
+an unmodified submodule at `upstream/btleplug`, while
+`patches/btleplug-macos-connected.patch` contains the small macOS-only extension for retrieving
+already connected peripherals. The `mise` Rust tasks materialize the patched dependency under the
+ignored `.build` directory before invoking Cargo.
+
 ## Clone and build
 
 Requirements: macOS with full Xcode installed (Command Line Tools alone are insufficient).
@@ -173,14 +179,65 @@ git -C upstream/BlackHole checkout <new-commit-or-tag>
 Commit the new submodule pointer only after the patch check and a driver build pass. If the patch no
 longer applies, refresh only `patches/mic-flurry.patch`; do not edit the submodule working tree.
 
+## Updating btleplug
+
+```bash
+git -C upstream/btleplug fetch origin
+git -C upstream/btleplug checkout <new-commit-or-tag>
+./scripts/check-btleplug-patch.sh
+mise run rust-check
+```
+
+Keep `upstream/btleplug` pristine. If the patch no longer applies, refresh only
+`patches/btleplug-macos-connected.patch`, then commit the patch and submodule pointer together.
+
 ## Roadmap
 
 - Milestone 0: visible input + output loopback baseline
 - Milestone 1: visible input-only device backed by a hidden output-only mirror device (complete)
-- Milestone 2: foreground Rust Bluetooth-to-CoreAudio vertical slice
+- Milestone 2: foreground Rust Bluetooth-to-CoreAudio vertical slice (implemented and validated on
+  the registered `小米语音遥控器` hardware fingerprint)
 
 The component boundaries, daemon/control API design, persistence decisions, and staged delivery plan
 are documented in [MILESTONES.md](MILESTONES.md).
+
+## Foreground Rust prototype
+
+Milestone 2 adds a Rust workspace with UI-independent control and runtime crates plus a Ratatui
+foreground client. It reads supported remotes already connected by macOS, attaches through
+CoreBluetooth, negotiates the Google ATVV v1 GATT profile, decodes its IMA
+ADPCM stream, resamples 8 or 16 kHz speech to the configured driver rate, and writes mono `Float32`
+to `MicFlurry_2_UID` through AUHAL.
+
+Install the pinned toolchain and verify the workspace:
+
+```bash
+mise install
+mise run rust-check
+```
+
+Install and activate the MicFlurry driver as described above, allow Bluetooth access for the
+terminal application under System Settings → Privacy & Security → Bluetooth, then run:
+
+```bash
+mise run micflurry
+```
+
+The terminal also needs Accessibility permission before CGEvent keyboard actions work. The runtime
+does not install the driver, restart CoreAudio, or change either permission itself. Pair and connect
+the remote in macOS Bluetooth Settings first. Use `s` to refresh the system-connected device list,
+the arrow keys and Return to attach, `r` to record, `<`/`>` to adjust persisted input gain,
+and `q` to quit. The complete controls,
+state paths, protocol behavior, and hardware checklist are in
+[docs/milestone-2.md](docs/milestone-2.md).
+
+At startup the runtime asks CoreBluetooth for system-connected peripherals exposing the ATVV service.
+It joins those UUIDs to read-only IOHID identity data and accepts only registered hardware
+fingerprints. The currently verified fingerprint is manufacturer `MIOM`, vendor ID `10007`, product
+ID `12984`; its observed product name is `小米语音遥控器`. The displayed name is not used for
+authorization and may be changed by the user. MicFlurry remembers the last successful UUID only to
+select among multiple supported devices. It never scans, creates or removes system pairing, and
+releasing or quitting MicFlurry does not disconnect a link macOS already owned.
 
 ## License
 

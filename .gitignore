@@ -5,3 +5,8 @@ DerivedData/
 .DS_Store
 *.xcuserstate
 xcuserdata/
+target/
+*.db
+*.db-shm
+*.db-wal
+recordings/
