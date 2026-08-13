@@ -272,6 +272,27 @@ mod tests {
     }
 
     #[test]
+    fn audio_sync_recovers_decoder_after_a_lost_notification() {
+        let first = [0x17, 0x24, 0x38, 0x41];
+        let lost = [0x8f, 0x76, 0x55, 0x31];
+        let after_sync = [0x19, 0x2a, 0xb4, 0x07];
+
+        let mut encoder_state = ImaAdpcmDecoder::default();
+        encoder_state.decode(&first);
+        encoder_state.decode(&lost);
+        let predictor = i16::try_from(encoder_state.predictor).unwrap();
+        let step_index = u8::try_from(encoder_state.step_index).unwrap();
+        let expected = encoder_state.decode(&after_sync);
+
+        let mut receiver = ImaAdpcmDecoder::default();
+        receiver.decode(&first);
+        let mut unsynchronized = receiver.clone();
+        assert_ne!(unsynchronized.decode(&after_sync), expected);
+        receiver.synchronize(predictor, step_index).unwrap();
+        assert_eq!(receiver.decode(&after_sync), expected);
+    }
+
+    #[test]
     fn parses_complete_capability_payload_and_firmware_data() {
         assert_eq!(
             parse_control(&[0x0b, 0x01, 0x00, 0x03, 0x01, 0x00, 0xa0, 0x01, 0x00, 0xaa]).unwrap(),

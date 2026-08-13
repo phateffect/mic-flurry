@@ -15,9 +15,14 @@ mod platform {
     #[allow(unsafe_code)]
     pub fn post(action: KeyboardAction) -> Result<()> {
         let key_code = match action {
+            KeyboardAction::Up => 0x7e,
+            KeyboardAction::Down => 0x7d,
+            KeyboardAction::Left | KeyboardAction::Previous => 0x7b,
+            KeyboardAction::Right | KeyboardAction::Next => 0x7c,
+            KeyboardAction::Select => 0x24, // Return
+            KeyboardAction::Back => 0x35,   // Escape
+            KeyboardAction::Home => 0x73,
             KeyboardAction::PlayPause => 0x31, // Space
-            KeyboardAction::Previous => 0x7b,  // Left arrow
-            KeyboardAction::Next => 0x7c,      // Right arrow
             KeyboardAction::VolumeDown => 0x49,
             KeyboardAction::VolumeUp => 0x48,
             KeyboardAction::Mute => 0x4a,

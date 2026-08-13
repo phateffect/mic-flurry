@@ -1201,6 +1201,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "micflurry-hid-probe"
+version = "0.2.0"
+dependencies = [
+ "anyhow",
+ "core-foundation",
+]
+
+[[package]]
 name = "micflurry-tui"
 version = "0.2.0"
 dependencies = [

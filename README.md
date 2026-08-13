@@ -90,8 +90,9 @@ the split mirror topology. Names, visibility, formats, and other customization a
 The Rust runtime uses the same upstream discipline for `btleplug`: the official source is pinned as
 an unmodified submodule at `upstream/btleplug`, while
 `patches/btleplug-macos-connected.patch` contains the small macOS-only extension for retrieving
-already connected peripherals. The `mise` Rust tasks materialize the patched dependency under the
-ignored `.build` directory before invoking Cargo.
+already connected peripherals and reporting the CoreBluetooth-derived ATT MTU. The `mise` Rust
+tasks materialize the patched dependency under the ignored `.build` directory before invoking
+Cargo.
 
 ## Clone and build
 
@@ -200,6 +201,12 @@ Keep `upstream/btleplug` pristine. If the patch no longer applies, refresh only
 
 The component boundaries, daemon/control API design, persistence decisions, and staged delivery plan
 are documented in [MILESTONES.md](MILESTONES.md).
+
+The final remapping design keeps `micflurryd` in the logged-in user's launchd session and delegates
+only exclusive RC003 IOHID capture to a narrow root helper. The current plan is seizure-only and does
+not include a CGEvent suppression fallback. Before that helper is implemented, the bounded root
+feasibility probe and its hardware checklist are documented in
+[docs/hid-seize-probe.md](docs/hid-seize-probe.md).
 
 ## Foreground Rust prototype
 

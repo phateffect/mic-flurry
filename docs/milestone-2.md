@@ -31,10 +31,17 @@ Useful diagnostic flags are passed after `--`:
 mise run micflurry -- --no-audio
 mise run micflurry -- --no-bluetooth
 mise run micflurry -- --database /tmp/micflurry-test.db
+mise run micflurry -- --drop-audio-notification 2
+mise run micflurry -- --seize-hid
 ```
 
 `--no-audio` keeps discovery, persistence, and the UI available without an installed driver.
-`--no-bluetooth` is useful for local control and database testing.
+`--no-bluetooth` is useful for local control and database testing. The one-based
+`--drop-audio-notification` option deliberately skips one decoded notification per session so the
+next `AUDIO_SYNC` gap and recovery can be characterized. `--seize-hid` is an explicit development
+mode: it prevents macOS and other clients from receiving the attached remote's HID input, then
+forwards recognized buttons as CGEvents. Normal runs observe HID values without seizing or
+re-forwarding them.
 
 The `mise run micflurry` development task appends structured runtime diagnostics to
 `/tmp/micflurry-dev.log`. Set `MICFLURRY_LOG` to choose another file, or run the binary without that
@@ -49,12 +56,16 @@ interpreting protocol logs because CoreBluetooth can deliver the same notificati
    Bluetooth. A future app bundle must instead include `NSBluetoothAlwaysUsageDescription`.
 3. Give that terminal Accessibility access before using keyboard actions. MicFlurry posts ordinary
    CGEvent key presses and never changes the permission itself.
+4. Give the terminal Input Monitoring access if macOS requires it for IOHID input callbacks.
+   Exclusive `--seize-hid` mode can temporarily make the remote unavailable to the system; quit or
+   release the device to close the exclusive IOHID handle.
 
 At startup MicFlurry first uses the public `retrieveConnectedPeripheralsWithServices:` API to list
 system-connected ATVV peripherals, including a remote connected through macOS before MicFlurry has
 ever seen it. Users always pair and connect the remote in macOS Bluetooth Settings; MicFlurry never
-scans or initiates system pairing. A read-only IOHID lookup joins each CoreBluetooth UUID to the HID
-manufacturer and VID/PID. The current supported hardware fingerprint is `MIOM`, vendor ID `10007`,
+scans or initiates system pairing. A non-exclusive IOHID monitor joins each CoreBluetooth UUID to the
+HID manufacturer and VID/PID and reports every input usage/value to the TUI. The current supported
+hardware fingerprint is `MIOM`, vendor ID `10007`,
 product ID `12984`; its observed IOHID product name is `小米语音遥控器`. User-visible names are
 display-only and may be renamed. The last successful UUID is persisted only to choose among multiple
 supported, already-connected remotes. Releasing or quitting MicFlurry stops its notification task
@@ -76,9 +87,10 @@ without disconnecting a link macOS owned first.
 | `m` | post the macOS mute key code through CGEvent |
 | `q` | stop the foreground runtime and quit |
 
-The UI displays refresh/attachment state, the active or most recently completed session duration,
-source and output rates, persisted input gain, decoded and dropped samples, the input level (limited
-to ten updates per second), recording state, and the latest error. The duration resets on
+The UI displays refresh/attachment state, standard GATT Device Information, IOHID identity and input
+history, CGEvent output history, ATT MTU, audio notification-size distribution, sync frame gaps, the
+active or most recently completed session duration, source/output rates, persisted input gain,
+decoded/dropped samples, input level, recording state, and the latest error. The duration resets on
 `AUDIO_START`, advances while active, and freezes on `AUDIO_STOP` or disconnect.
 
 ## ATVV profile
@@ -125,12 +137,13 @@ all passed. A held session stopped at 60 seconds in the remote firmware after fi
 `MIC_EXTEND` commands, and a new session began after release and another press. The runtime also
 independently caps active sessions at 60 seconds and sends `MIC_CLOSE` with the negotiated stream ID.
 
-Automated tests still do not emulate CoreBluetooth or a HAL render cycle. The following expand the
-coverage beyond the currently registered 16 kHz device:
+Automated tests still do not emulate CoreBluetooth or a HAL render cycle. They now cover an injected
+notification loss followed by decoder synchronization, a 16-to-8 kHz sync transition, frame-gap
+accounting with wraparound, and host-owned cutoff state. The following physical coverage remains:
 
-1. Exercise an 8 kHz remote/stream and a deliberate `AUDIO_SYNC` rate transition.
-2. Record ATT MTU and notification-size distributions and inject a lost ADPCM notification before a
-   sync point.
+1. Exercise an 8 kHz remote/stream and a deliberate `AUDIO_SYNC` rate transition on hardware.
+2. Capture the exposed ATT MTU and notification-size distribution, then use
+   `--drop-audio-notification` before a real remote-generated sync point.
 3. Exercise the host-owned cutoff against a supported device whose firmware would otherwise run
    beyond 60 seconds.
 4. Repeat the lifecycle checks for every newly registered hardware fingerprint.

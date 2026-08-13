@@ -2,6 +2,7 @@
 members = [
     "crates/micflurry-control",
     "crates/micflurry-core",
+    "crates/micflurry-hid-probe",
     "crates/micflurry-tui",
 ]
 exclude = [".build/btleplug"]

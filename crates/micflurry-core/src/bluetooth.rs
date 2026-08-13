@@ -8,13 +8,23 @@ use btleplug::{
     platform::{Adapter, Manager, Peripheral},
 };
 use futures::StreamExt;
-use micflurry_control::{Device, DeviceId, DeviceSupport};
+use micflurry_control::{Device, DeviceId, DeviceInfo, DeviceSupport};
+use std::time::Duration;
 use tokio::{sync::mpsc, task::JoinHandle};
+use uuid::{Uuid, uuid};
 
 const XIAOMI_VOICE_REMOTE_MODEL: &str = "小米语音遥控器";
 const XIAOMI_MANUFACTURER: &str = "MIOM";
 const XIAOMI_VENDOR_ID: u32 = 10_007;
 const XIAOMI_PRODUCT_ID: u32 = 12_984;
+
+const DEVICE_INFORMATION_UUID: Uuid = uuid!("0000180a-0000-1000-8000-00805f9b34fb");
+const MODEL_NUMBER_UUID: Uuid = uuid!("00002a24-0000-1000-8000-00805f9b34fb");
+const SERIAL_NUMBER_UUID: Uuid = uuid!("00002a25-0000-1000-8000-00805f9b34fb");
+const FIRMWARE_REVISION_UUID: Uuid = uuid!("00002a26-0000-1000-8000-00805f9b34fb");
+const HARDWARE_REVISION_UUID: Uuid = uuid!("00002a27-0000-1000-8000-00805f9b34fb");
+const SOFTWARE_REVISION_UUID: Uuid = uuid!("00002a28-0000-1000-8000-00805f9b34fb");
+const MANUFACTURER_NAME_UUID: Uuid = uuid!("00002a29-0000-1000-8000-00805f9b34fb");
 
 #[derive(Debug)]
 pub enum BluetoothEvent {
@@ -51,7 +61,7 @@ impl Bluetooth {
         &mut self,
         id: &DeviceId,
         sender: mpsc::Sender<BluetoothEvent>,
-    ) -> Result<()> {
+    ) -> Result<DeviceInfo> {
         tracing::info!(event = "bluetooth_connect_start", device_id = %id, "connecting BLE peripheral");
         let peripheral = self
             .adapter
@@ -110,7 +120,7 @@ impl Bluetooth {
         peripheral: Peripheral,
         id: &DeviceId,
         sender: mpsc::Sender<BluetoothEvent>,
-    ) -> Result<()> {
+    ) -> Result<DeviceInfo> {
         let was_connected = peripheral.is_connected().await?;
         if !was_connected {
             peripheral.connect().await?;
@@ -133,7 +143,7 @@ impl Bluetooth {
         id: &DeviceId,
         sender: mpsc::Sender<BluetoothEvent>,
         connection_owned: bool,
-    ) -> Result<()> {
+    ) -> Result<DeviceInfo> {
         peripheral.discover_services().await?;
         let characteristics = peripheral.characteristics();
         let tx = characteristics
@@ -151,14 +161,17 @@ impl Bluetooth {
             .find(|characteristic| characteristic.uuid == CONTROL_UUID)
             .cloned()
             .context("device does not expose the ATVV control characteristic")?;
+        // Create the receiver before subscribing and writing GET_CAPS so fast notifications are
+        // buffered instead of being lost before the forwarding task starts.
+        let mut notifications = peripheral.notifications().await?;
         peripheral.subscribe(&audio).await?;
         peripheral.subscribe(&control).await?;
+        let device_info = read_device_info(peripheral, id).await;
         peripheral
             .write(&tx, &GET_CAPS, WriteType::WithoutResponse)
             .await?;
         tracing::info!(event = "bluetooth_connected", device_id = %id, "subscribed to ATVV notifications and requested capabilities");
 
-        let mut notifications = peripheral.notifications().await?;
         let notification_id = id.clone();
         let disconnected_id = id.clone();
         self.notification_task = Some(tokio::spawn(async move {
@@ -186,7 +199,7 @@ impl Bluetooth {
         }));
         self.connected = Some(peripheral.clone());
         self.connection_owned = connection_owned;
-        Ok(())
+        Ok(device_info)
     }
 
     pub async fn write_command(&self, bytes: &[u8]) -> Result<()> {
@@ -225,6 +238,107 @@ impl Bluetooth {
             task.abort();
         }
     }
+}
+
+async fn read_device_info(peripheral: &Peripheral, id: &DeviceId) -> DeviceInfo {
+    let characteristics = peripheral.characteristics();
+    let find = |uuid| {
+        characteristics
+            .iter()
+            .find(|characteristic| {
+                characteristic.service_uuid == DEVICE_INFORMATION_UUID
+                    && characteristic.uuid == uuid
+            })
+            .cloned()
+    };
+    let hid = Uuid::parse_str(&id.0).ok().and_then(|identifier| {
+        hid_identity::identities()
+            .ok()
+            .and_then(|identities| identities.get(&identifier).cloned())
+    });
+    let (
+        manufacturer_name,
+        model_number,
+        serial_number,
+        hardware_revision,
+        firmware_revision,
+        software_revision,
+    ) = tokio::join!(
+        read_text(peripheral, find(MANUFACTURER_NAME_UUID)),
+        read_text(peripheral, find(MODEL_NUMBER_UUID)),
+        read_text(peripheral, find(SERIAL_NUMBER_UUID)),
+        read_text(peripheral, find(HARDWARE_REVISION_UUID)),
+        read_text(peripheral, find(FIRMWARE_REVISION_UUID)),
+        read_text(peripheral, find(SOFTWARE_REVISION_UUID)),
+    );
+    let info = DeviceInfo {
+        att_mtu: Some(peripheral.mtu()),
+        manufacturer_name,
+        model_number,
+        serial_number,
+        hardware_revision,
+        firmware_revision,
+        software_revision,
+        hid_manufacturer: hid
+            .as_ref()
+            .and_then(|identity| identity.manufacturer.clone()),
+        hid_product: hid.as_ref().and_then(|identity| identity.product.clone()),
+        hid_vendor_id: hid.as_ref().and_then(|identity| identity.vendor_id),
+        hid_product_id: hid.as_ref().and_then(|identity| identity.product_id),
+        hid_transport: hid.as_ref().and_then(|identity| identity.transport.clone()),
+        hid_serial_number: hid
+            .as_ref()
+            .and_then(|identity| identity.serial_number.clone()),
+        hid_version_number: hid.as_ref().and_then(|identity| identity.version_number),
+        physical_device_id: hid.and_then(|identity| identity.physical_device_id),
+    };
+    tracing::info!(
+        event = "device_info",
+        device_id = %id,
+        att_mtu = ?info.att_mtu,
+        manufacturer = ?info.manufacturer_name,
+        model = ?info.model_number,
+        firmware = ?info.firmware_revision,
+        hardware = ?info.hardware_revision,
+        hid_product = ?info.hid_product,
+        hid_transport = ?info.hid_transport,
+        "read connected remote device information"
+    );
+    info
+}
+
+async fn read_text(
+    peripheral: &Peripheral,
+    characteristic: Option<btleplug::api::Characteristic>,
+) -> Option<String> {
+    let characteristic = characteristic?;
+    let bytes = match tokio::time::timeout(Duration::from_secs(2), peripheral.read(&characteristic))
+        .await
+    {
+        Ok(Ok(bytes)) => bytes,
+        Ok(Err(error)) => {
+            tracing::debug!(
+                event = "device_info_read_failed",
+                characteristic = %characteristic.uuid,
+                error = %error,
+                "could not read optional Device Information characteristic"
+            );
+            return None;
+        }
+        Err(_) => {
+            tracing::debug!(
+                event = "device_info_read_timeout",
+                characteristic = %characteristic.uuid,
+                "optional Device Information read timed out"
+            );
+            return None;
+        }
+    };
+    let value = String::from_utf8_lossy(&bytes)
+        .trim_matches(char::from(0))
+        .trim()
+        .to_owned();
+    (!value.is_empty()).then_some(value)
 }
 
 async fn unsubscribe_atvv(peripheral: &Peripheral) {
@@ -310,6 +424,7 @@ mod tests {
             product: Some("user may rename this".into()),
             vendor_id: Some(10_007),
             product_id: Some(12_984),
+            ..HidIdentity::default()
         };
         assert!(supported_identity(Some(&supported)).is_some());
         assert!(

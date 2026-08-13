@@ -29,6 +29,14 @@ depends = ["prepare-btleplug"]
 env = { MICFLURRY_LOG = "/tmp/micflurry-dev.log", RUST_LOG = "micflurry_core=debug,micflurry=info" }
 run = "cargo run -p micflurry-tui -- --database /tmp/micflurry-dev.db"
 
+[tasks.hid-seize-probe-build]
+description = "Build the root-only RC003 IOHID seize probe"
+run = "cargo build -p micflurry-hid-probe"
+
+[tasks.hid-seize-launchdaemon-probe-build]
+description = "Build the ad-hoc-signed development LaunchDaemon probe bundle"
+run = "./scripts/build-hid-seize-launchdaemon-probe.sh"
+
 [tasks.verify-asr]
 description = "Verify installed CoreAudio endpoints using sandbox-writable compiler caches"
 env = {
