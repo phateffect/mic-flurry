@@ -60,6 +60,43 @@ impl LinearResampler {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde::Deserialize;
+    use std::{fs, path::PathBuf};
+
+    #[derive(Deserialize)]
+    struct Fixtures {
+        resampling: Vec<ResamplingFixture>,
+    }
+
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct ResamplingFixture {
+        input_rate: u32,
+        output_rate: u32,
+        blocks: Vec<Vec<i16>>,
+        expected: Vec<f32>,
+    }
+
+    fn fixtures() -> Fixtures {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../Fixtures/audio-core.json");
+        serde_json::from_slice(&fs::read(path).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn shared_resampling_fixtures_match_the_accepted_rust_behavior() {
+        for fixture in fixtures().resampling {
+            let mut resampler = LinearResampler::new(fixture.input_rate, fixture.output_rate);
+            let actual: Vec<f32> = fixture
+                .blocks
+                .iter()
+                .flat_map(|block| resampler.process_i16(block))
+                .collect();
+            assert_eq!(actual.len(), fixture.expected.len());
+            for (actual, expected) in actual.iter().zip(fixture.expected) {
+                assert!((actual - expected).abs() < 0.000_001);
+            }
+        }
+    }
 
     #[test]
     fn upsamples_across_block_boundaries() {

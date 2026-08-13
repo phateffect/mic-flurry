@@ -211,7 +211,7 @@ crates/
 ├── micflurry-hid-probe/              bounded development feasibility probe
 └── micflurry-tui/                    terminal client
 
-Package.swift                          future Swift core packages and executables
+Package.swift                          Swift core packages and executables
 Sources/
 ├── MicFlurryDomain/                  core state and language-independent DTOs
 ├── MicFlurryATVV/                    ATVV protocol and audio decode
@@ -227,6 +227,9 @@ apps/MicFlurry/                        signed service host; native UI optional
 docs/control-api.md                   added when the socket API is made public
 docs/TODO-swift-core.md                executable migration and acceptance plan
 ```
+
+The Swift services and service host target Apple Silicon (`arm64`) and macOS 15 or later. The
+existing Rust runtime remains a behavioral reference rather than a second production core.
 
 Core packages and the control contract must not depend on a particular UI. Exact module boundaries
 can be adjusted when implementation reveals a cleaner dependency graph; the process and ownership
@@ -369,8 +372,9 @@ not include reliable stored-recording transfer, OTA, a daemon, or a custom drive
   [docs/TODO-swift-core.md](docs/TODO-swift-core.md). Preserve the current Rust runtime as the
   hardware-validated behavioral reference until the Swift acceptance matrix passes.
 - Run `micflurryd` as a per-user LaunchAgent, not as root.
-- Implement `SocketControlClient` and the versioned Unix socket protocol described above.
+- Implement `SocketControlClient` and the versioned Unix socket protocol described above. (Done.)
 - Convert the TUI into a normal socket client with no direct SQLite, Bluetooth, or CoreAudio access.
+  (Done; quitting the client leaves daemon-owned work running.)
 - After the root probe validates exclusive capture, add the narrow root `micflurry-hid-helper` and
   its private authenticated XPC protocol. It seizes all interfaces matching the registered RC003
   fingerprint atomically and streams all raw reports/usages; `micflurryd` owns mapping and CGEvent

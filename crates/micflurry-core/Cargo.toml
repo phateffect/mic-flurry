@@ -30,6 +30,8 @@ objc2-core-audio = "0.3.2"
 objc2-core-foundation = "0.3.2"
 
 [dev-dependencies]
+serde.workspace = true
+serde_json.workspace = true
 tempfile = "3.23.0"
 
 [lints]

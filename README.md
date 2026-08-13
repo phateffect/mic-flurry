@@ -114,6 +114,28 @@ git submodule update --init --recursive
 The ad-hoc signed development driver is written to `build/MicFlurry.driver`. Distribution builds
 need to be signed with your Developer ID and notarized separately.
 
+The in-progress Swift core targets Apple Silicon and macOS 15 or later. Build and test both the
+Swift migration and the retained Rust behavioral reference with:
+
+```bash
+mise run swift-check
+mise run rust-check
+# or run both:
+mise run check
+```
+
+These tasks keep Swift compiler, module, package, and security caches inside `.build` or
+MicFlurry-specific paths under `/tmp`.
+
+The Swift daemon exposes its versioned JSON-RPC 2.0 control service at
+`~/Library/Application Support/MicFlurry/run/control.sock`. It accepts multiple local clients,
+broadcasts bounded state events, and never carries PCM. The wire contract and development
+`--socket` override are documented in [docs/control-api.md](docs/control-api.md).
+
+The Swift CoreBluetooth adapter uses macOS-connected ATVV retrieval only. It may still establish a
+CoreBluetooth session for the current process before discovering GATT services; releasing that
+session does not remove pairing or disconnect the system-owned HID link.
+
 ## Build a release-style test installer
 
 Build an unsigned `.pkg` like the artifact users will eventually download from GitHub Releases:
@@ -212,13 +234,11 @@ not include a CGEvent suppression fallback. Before that helper is implemented, t
 feasibility probe and its hardware checklist are documented in
 [docs/hid-seize-probe.md](docs/hid-seize-probe.md).
 
-## Foreground Rust prototype
+## Rust reference core and TUI client
 
-Milestone 2 adds a Rust workspace with UI-independent control and runtime crates plus a Ratatui
-foreground client. It reads supported remotes already connected by macOS, attaches through
-CoreBluetooth, negotiates the Google ATVV v1 GATT profile, decodes its IMA
-ADPCM stream, resamples 8 or 16 kHz speech to the configured driver rate, and writes mono `Float32`
-to `MicFlurry_2_UID` through AUHAL.
+The Milestone 2 Rust runtime remains the hardware-validated behavioral reference. The Ratatui
+application is now a pure client of the Swift `micflurryd` Unix socket: it does not open SQLite,
+CoreBluetooth, CoreAudio, or IOHID itself, and quitting it does not stop daemon-owned work.
 
 Install the pinned toolchain and verify the workspace:
 
@@ -227,20 +247,17 @@ mise install
 mise run rust-check
 ```
 
-Install and activate the MicFlurry driver as described above, allow Bluetooth access for the
-terminal application under System Settings → Privacy & Security → Bluetooth, then run:
+Install and start the Swift services as described above, then run:
 
 ```bash
 mise run micflurry
 ```
 
-The terminal also needs Accessibility permission before CGEvent keyboard actions work. The runtime
-does not install the driver, restart CoreAudio, or change either permission itself. Pair and connect
-the remote in macOS Bluetooth Settings first. Use `s` to refresh the system-connected device list,
-the arrow keys and Return to attach, `r` to record, `<`/`>` to adjust persisted input gain,
-and `q` to quit. The complete controls,
-state paths, protocol behavior, and hardware checklist are in
-[docs/milestone-2.md](docs/milestone-2.md).
+By default the client connects to
+`~/Library/Application Support/MicFlurry/run/control.sock`; pass `--socket PATH` after
+`mise run micflurry --` to target an isolated daemon. Use `s` to refresh the system-connected device
+list, the arrow keys and Return to attach, `d` to release, `r` to record, `h` to toggle exclusive
+HID capture, `<`/`>` to adjust persisted input gain, and `q` to quit.
 
 At startup the runtime asks CoreBluetooth for system-connected peripherals exposing the ATVV service.
 It joins those UUIDs to read-only IOHID identity data and accepts only registered hardware

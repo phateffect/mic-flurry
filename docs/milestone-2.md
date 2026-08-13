@@ -1,7 +1,12 @@
 # Milestone 2 foreground runtime
 
-Milestone 2 is one foreground `micflurry` process. Ratatui calls a `LocalControlClient`; Bluetooth,
-audio, recordings, keyboard events, and SQLite remain in `micflurry-core`. There is no daemon,
+> Historical acceptance record: this document describes the validated Milestone 2 architecture.
+> The production core has moved to the Swift Milestone 3 services. `mise run micflurry` now starts
+> the Rust TUI as a socket-only client of `micflurryd`; it no longer accepts the foreground-runtime
+> flags documented below or owns Bluetooth, audio, HID, recordings, or SQLite.
+
+Milestone 2 was one foreground `micflurry` process. Ratatui called a `LocalControlClient`; Bluetooth,
+audio, recordings, keyboard events, and SQLite remained in `micflurry-core`. There was no daemon,
 launchd job, Unix socket, application bundle, or custom driver IPC in this milestone.
 
 ```text
@@ -11,29 +16,31 @@ ATVV remote -> CoreBluetooth -> IMA ADPCM decoder -> streaming resampler
 Ratatui -> LocalControlClient -> in-process runtime
 ```
 
-## Build and run
+## Historical build and run
 
 The repository pins Rust 1.91 through mise:
 
 ```bash
 mise install
 mise run rust-check
-mise run micflurry
 ```
 
 These tasks first export the pinned, unmodified `upstream/btleplug` submodule into
 `.build/btleplug` and apply `patches/btleplug-macos-connected.patch`. Use the `mise` entry points
 after a fresh clone instead of invoking Cargo before that generated dependency exists.
 
-Useful diagnostic flags are passed after `--`:
+During Milestone 2, the foreground executable accepted these diagnostic flags:
 
 ```bash
-mise run micflurry -- --no-audio
-mise run micflurry -- --no-bluetooth
-mise run micflurry -- --database /tmp/micflurry-test.db
-mise run micflurry -- --drop-audio-notification 2
-mise run micflurry -- --seize-hid
+--no-audio
+--no-bluetooth
+--database /tmp/micflurry-test.db
+--drop-audio-notification 2
+--seize-hid
 ```
+
+They are retained here only to explain the hardware-validation procedure. Exercise the reference
+Rust core through `mise run rust-check`; use `mise run micflurry` for the current socket TUI.
 
 `--no-audio` keeps discovery, persistence, and the UI available without an installed driver.
 `--no-bluetooth` is useful for local control and database testing. The one-based

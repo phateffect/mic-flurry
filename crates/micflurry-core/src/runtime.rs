@@ -130,6 +130,16 @@ impl ControlClient for LocalControlClient {
     async fn stop_recording(&self) -> micflurry_control::Result<()> {
         self.request(Command::StopRecording).await
     }
+    async fn start_hid_capture(&self) -> micflurry_control::Result<()> {
+        Err(ControlError::Invalid(
+            "the foreground runtime configures HID capture at startup".into(),
+        ))
+    }
+    async fn stop_hid_capture(&self) -> micflurry_control::Result<()> {
+        Err(ControlError::Invalid(
+            "the foreground runtime configures HID capture at startup".into(),
+        ))
+    }
     async fn keyboard_action(&self, action: KeyboardAction) -> micflurry_control::Result<()> {
         self.request(|reply| Command::Keyboard(action, reply)).await
     }
@@ -948,7 +958,9 @@ impl Runtime {
 
     fn publish_status(&mut self) {
         self.update_session_duration();
-        self.emit(Event::Status(Box::new(self.status.clone())));
+        self.emit(Event::Status {
+            status: Box::new(self.status.clone()),
+        });
     }
 
     fn update_session_duration(&mut self) {

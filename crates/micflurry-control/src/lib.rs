@@ -1,13 +1,28 @@
 //! UI-independent control boundary for the foreground runtime and the future daemon.
 
 use async_trait::async_trait;
-use serde::{Deserialize, Serialize};
-use std::{fmt, pin::Pin};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use serde_json::{Value, json};
+use std::{
+    fmt,
+    path::{Path, PathBuf},
+    pin::Pin,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
+};
+use tokio::{
+    io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
+    net::UnixStream,
+    sync::mpsc,
+};
 use tokio_stream::Stream;
 
 pub type EventStream = Pin<Box<dyn Stream<Item = Event> + Send>>;
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
+#[serde(default)]
 pub struct Status {
     pub bluetooth: BluetoothState,
     pub devices: Vec<Device>,
@@ -50,11 +65,63 @@ pub struct Device {
     pub support: DeviceSupport,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum DeviceSupport {
     Unsupported,
     Supported { model: String },
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum DeviceSupportDecode {
+    Current(DeviceSupportObject),
+    Legacy(DeviceSupportLegacy),
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum DeviceSupportObject {
+    Unsupported {},
+    Supported { model: String },
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum DeviceSupportLegacy {
+    Unsupported,
+    Supported { model: String },
+}
+
+impl<'de> Deserialize<'de> for DeviceSupport {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let decoded = DeviceSupportDecode::deserialize(deserializer)?;
+        Ok(match decoded {
+            DeviceSupportDecode::Current(DeviceSupportObject::Unsupported {})
+            | DeviceSupportDecode::Legacy(DeviceSupportLegacy::Unsupported) => Self::Unsupported,
+            DeviceSupportDecode::Current(DeviceSupportObject::Supported { model })
+            | DeviceSupportDecode::Legacy(DeviceSupportLegacy::Supported { model }) => {
+                Self::Supported { model }
+            }
+        })
+    }
+}
+
+impl Serialize for DeviceSupport {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        match self {
+            Self::Unsupported => DeviceSupportObject::Unsupported {}.serialize(serializer),
+            Self::Supported { model } => DeviceSupportObject::Supported {
+                model: model.clone(),
+            }
+            .serialize(serializer),
+        }
+    }
 }
 
 impl DeviceSupport {
@@ -73,8 +140,10 @@ impl DeviceSupport {
 }
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
+#[serde(default)]
 pub struct AudioStatus {
     pub active: bool,
+    #[serde(alias = "session_duration_milliseconds")]
     pub session_duration_ms: u64,
     pub source_rate_hz: Option<u32>,
     pub output_rate_hz: u32,
@@ -83,6 +152,7 @@ pub struct AudioStatus {
     pub dropped_frames: u64,
     pub protocol_version: Option<u16>,
     pub stream_id: Option<u8>,
+    #[serde(alias = "microphone_extends_sent")]
     pub mic_extends_sent: u64,
     pub last_stop_reason: Option<u8>,
     pub negotiated_codecs: Option<u8>,
@@ -132,6 +202,7 @@ pub enum HidCaptureMode {
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(default)]
 pub struct HidStatus {
     pub mode: HidCaptureMode,
     pub active: bool,
@@ -168,6 +239,7 @@ pub struct KeyboardOutput {
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(default)]
 pub struct RecordingStatus {
     pub active: bool,
     pub path: Option<String>,
@@ -213,7 +285,7 @@ pub enum KeyboardAction {
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Event {
-    Status(Box<Status>),
+    Status { status: Box<Status> },
     DeviceDiscovered { device: Device },
     Attaching { device: DeviceId, active: bool },
     Connected { device: DeviceId },
@@ -250,6 +322,234 @@ pub trait ControlClient: Clone + Send + Sync + 'static {
     async fn release(&self) -> Result<()>;
     async fn start_recording(&self) -> Result<()>;
     async fn stop_recording(&self) -> Result<()>;
+    async fn start_hid_capture(&self) -> Result<()>;
+    async fn stop_hid_capture(&self) -> Result<()>;
     async fn keyboard_action(&self, action: KeyboardAction) -> Result<()>;
     fn subscribe(&self) -> EventStream;
+}
+
+#[derive(Clone, Debug)]
+pub struct SocketControlClient {
+    socket_path: Arc<PathBuf>,
+    next_id: Arc<AtomicU64>,
+}
+
+impl SocketControlClient {
+    #[must_use]
+    pub fn new(socket_path: impl Into<PathBuf>) -> Self {
+        Self {
+            socket_path: Arc::new(socket_path.into()),
+            next_id: Arc::new(AtomicU64::new(1)),
+        }
+    }
+
+    /// Returns the standard per-user daemon socket path.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the platform does not expose an application-support directory.
+    pub fn default_socket_path() -> Result<PathBuf> {
+        dirs::data_dir()
+            .map(|directory| directory.join("MicFlurry/run/control.sock"))
+            .ok_or_else(|| {
+                ControlError::Invalid("application support directory unavailable".into())
+            })
+    }
+
+    async fn request<R: DeserializeOwned>(&self, method: &str, params: Option<Value>) -> Result<R> {
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        let request = WireRequest {
+            jsonrpc: "2.0",
+            id,
+            method,
+            params,
+        };
+        let mut stream = UnixStream::connect(self.socket_path.as_ref())
+            .await
+            .map_err(|error| socket_error(self.socket_path.as_ref(), &error))?;
+        let mut frame = serde_json::to_vec(&request)
+            .map_err(|error| ControlError::Invalid(error.to_string()))?;
+        frame.push(b'\n');
+        stream
+            .write_all(&frame)
+            .await
+            .map_err(|error| socket_error(self.socket_path.as_ref(), &error))?;
+
+        let mut lines = BufReader::new(stream).lines();
+        while let Some(line) = lines
+            .next_line()
+            .await
+            .map_err(|error| socket_error(self.socket_path.as_ref(), &error))?
+        {
+            let response: WireResponse = serde_json::from_str(&line)
+                .map_err(|error| ControlError::Invalid(error.to_string()))?;
+            if response.id != Some(id) {
+                continue;
+            }
+            if let Some(error) = response.error {
+                return Err(ControlError::Failed(format!(
+                    "{} ({})",
+                    error.message, error.code
+                )));
+            }
+            return serde_json::from_value(response.result.unwrap_or(Value::Null))
+                .map_err(|error| ControlError::Invalid(error.to_string()));
+        }
+        Err(ControlError::Unavailable)
+    }
+}
+
+#[async_trait]
+impl ControlClient for SocketControlClient {
+    async fn status(&self) -> Result<Status> {
+        self.request("v1.status", None).await
+    }
+
+    async fn settings(&self) -> Result<Settings> {
+        self.request("v1.settings", None).await
+    }
+
+    async fn set_settings(&self, change: SettingsChange) -> Result<Settings> {
+        self.request("v1.set_settings", Some(json!(change))).await
+    }
+
+    async fn refresh_devices(&self) -> Result<()> {
+        self.request("v1.refresh_devices", None).await
+    }
+
+    async fn connect(&self, device: DeviceId) -> Result<()> {
+        self.request("v1.connect", Some(json!({ "device": device })))
+            .await
+    }
+
+    async fn release(&self) -> Result<()> {
+        self.request("v1.release", None).await
+    }
+
+    async fn start_recording(&self) -> Result<()> {
+        self.request("v1.start_recording", None).await
+    }
+
+    async fn stop_recording(&self) -> Result<()> {
+        self.request("v1.stop_recording", None).await
+    }
+
+    async fn start_hid_capture(&self) -> Result<()> {
+        self.request("v1.start_hid_capture", None).await
+    }
+
+    async fn stop_hid_capture(&self) -> Result<()> {
+        self.request("v1.stop_hid_capture", None).await
+    }
+
+    async fn keyboard_action(&self, _action: KeyboardAction) -> Result<()> {
+        Err(ControlError::Invalid(
+            "keyboard injection is not part of control API v1".into(),
+        ))
+    }
+
+    fn subscribe(&self) -> EventStream {
+        let path = Arc::clone(&self.socket_path);
+        let (sender, receiver) = mpsc::channel(256);
+        tokio::spawn(async move {
+            let result = async {
+                let stream = UnixStream::connect(path.as_ref())
+                    .await
+                    .map_err(|error| socket_error(path.as_ref(), &error))?;
+                let mut lines = BufReader::new(stream).lines();
+                while let Some(line) = lines
+                    .next_line()
+                    .await
+                    .map_err(|error| socket_error(path.as_ref(), &error))?
+                {
+                    let notification: WireNotification = match serde_json::from_str(&line) {
+                        Ok(value) => value,
+                        Err(_) => continue,
+                    };
+                    if notification.method != "v1.event" {
+                        continue;
+                    }
+                    let event = serde_json::from_value(notification.params)
+                        .map_err(|error| ControlError::Invalid(error.to_string()))?;
+                    if sender.send(event).await.is_err() {
+                        return Ok(());
+                    }
+                }
+                Err(ControlError::Unavailable)
+            }
+            .await;
+            if let Err(error) = result {
+                let _ = sender
+                    .send(Event::Error {
+                        message: error.to_string(),
+                    })
+                    .await;
+            }
+        });
+        Box::pin(tokio_stream::wrappers::ReceiverStream::new(receiver))
+    }
+}
+
+fn socket_error(path: &Path, error: &std::io::Error) -> ControlError {
+    ControlError::Failed(format!("{}: {error}", path.display()))
+}
+
+#[derive(Serialize)]
+struct WireRequest<'a> {
+    jsonrpc: &'static str,
+    id: u64,
+    method: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    params: Option<Value>,
+}
+
+#[derive(Deserialize)]
+struct WireResponse {
+    id: Option<u64>,
+    result: Option<Value>,
+    error: Option<WireError>,
+}
+
+#[derive(Deserialize)]
+struct WireError {
+    code: i64,
+    message: String,
+}
+
+#[derive(Deserialize)]
+struct WireNotification {
+    method: String,
+    params: Value,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{DeviceSupport, Event};
+
+    #[test]
+    fn decodes_swift_device_support_shapes() {
+        assert_eq!(
+            serde_json::from_str::<DeviceSupport>(r#"{"unsupported":{}}"#).unwrap(),
+            DeviceSupport::Unsupported
+        );
+        assert_eq!(
+            serde_json::from_str::<DeviceSupport>(r#"{"supported":{"model":"RC003"}}"#).unwrap(),
+            DeviceSupport::Supported {
+                model: "RC003".into()
+            }
+        );
+        assert_eq!(
+            serde_json::from_str::<DeviceSupport>(r#""unsupported""#).unwrap(),
+            DeviceSupport::Unsupported
+        );
+    }
+
+    #[test]
+    fn decodes_swift_status_event_envelope() {
+        let event: Event = serde_json::from_str(
+            r#"{"type":"status","status":{"bluetooth":"idle","hid":{},"audio":{},"recording":{}}}"#,
+        )
+        .unwrap();
+        assert!(matches!(event, Event::Status { .. }));
+    }
 }
