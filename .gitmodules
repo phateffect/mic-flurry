@@ -1,6 +1,3 @@
 [submodule "upstream/BlackHole"]
 	path = upstream/BlackHole
 	url = https://github.com/ExistentialAudio/BlackHole.git
-[submodule "upstream/btleplug"]
-	path = upstream/btleplug
-	url = https://github.com/deviceplug/btleplug.git

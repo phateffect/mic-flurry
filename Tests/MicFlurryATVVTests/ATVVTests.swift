@@ -58,20 +58,20 @@ private func canonical(_ message: ATVVControlMessage) -> String {
   }
 }
 
-@Test func sharedControlFixturesMatchRustBehavior() throws {
+@Test func controlFixturesMatchAcceptedBehavior() throws {
   for item in try loadFixture().control {
     #expect(canonical(try ATVVControlParser.parse(item.bytes)) == item.expected)
   }
 }
 
-@Test func sharedADPCMFixturesMatchRustBehavior() throws {
+@Test func adpcmFixturesMatchAcceptedBehavior() throws {
   for item in try loadFixture().adpcm {
     var decoder = IMAADPCMDecoder()
     #expect(decoder.decode(item.encoded) == item.expected)
   }
 }
 
-@Test func sharedFrameDeltaFixturesMatchRustBehavior() throws {
+@Test func frameDeltaFixturesMatchAcceptedBehavior() throws {
   for item in try loadFixture().frameDeltas {
     #expect(
       ATVVFrameCounter.signedDelta(actual: item.actual, expected: item.expectedFrame) == item.delta)

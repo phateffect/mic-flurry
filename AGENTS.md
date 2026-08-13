@@ -62,15 +62,6 @@ When updating BlackHole:
 Do not copy upstream source into this repository or replace the submodule with a merged upstream
 history.
 
-`btleplug` follows the same unmodified-submodule strategy at `upstream/btleplug`. MicFlurry's macOS
-extension lives only in `patches/btleplug-macos-connected.patch`; it adds retrieval of peripherals
-already connected to macOS through CoreBluetooth's public API and updates btleplug's macOS MTU value
-from CoreBluetooth's maximum write length. `scripts/prepare-btleplug.sh` exports
-the pinned revision into `.build/btleplug` and applies the patch for Cargo. Never edit or commit
-generated `.build/btleplug` content or changes inside the submodule. Run
-`./scripts/check-btleplug-patch.sh` when changing the submodule pointer or patch, and commit those two
-changes together.
-
 ## Build and packaging
 
 - `scripts/build-driver.sh` exports a clean submodule snapshot, applies the patch in `.build`, builds
@@ -117,19 +108,14 @@ installer; `sudo killall coreaudiod` is the faster development path.
 - Repo builds and Rust tests must write inside the repository. Compiler/module caches that tools
   insist on placing outside the workspace must use a MicFlurry-specific directory under `/tmp`;
   never redirect a broad home directory or shared system cache.
-- Use the `mise` Rust tasks so the pinned `btleplug` source is prepared in `.build` before Cargo
-  resolves the workspace.
+- Swift is the only production core. The Rust workspace contains only the optional socket TUI demo;
+  do not add Bluetooth, CoreAudio, SQLite, or HID ownership back to Rust.
 - Use `mise run verify-asr` instead of invoking the Swift verifier directly. It puts Swift and Clang
   module caches under `/tmp`. CoreAudio device access can still require running this task in the
   host context because a filesystem-writable sandbox may expose an empty HAL device list.
 - `mise run micflurry -- <arguments>` runs the Rust TUI as a pure socket client of `micflurryd`.
   Pass `--socket PATH` for an isolated test daemon. The TUI must never open SQLite, Bluetooth, or
   CoreAudio directly, and quitting it must not stop daemon-owned work.
-- The development-only `micflurry-hid-probe` must be built as the normal user. It may seize only the
-  registered RC003 fingerprint and must exit after a bounded duration. Direct root runs use a native
-  macOS administrator prompt. The LaunchDaemon feasibility test may install only the exact ad-hoc
-  probe bundle and plist through the repository's dedicated scripts, and it must be uninstalled
-  after testing. Never run the complete application as root.
 - Private distribution to a small trusted tester group may use the repository's ad-hoc-signed
   traditional LaunchAgent/LaunchDaemon package instead of `SMAppService`. Its daemon and helper must
   mutually pin the expected identifiers and build-specific CDHashes, install only the documented
@@ -143,32 +129,29 @@ installer; `sudo killall coreaudiod` is the faster development path.
 
 - The current Milestone 1 topology exposes a visible input-only `MicFlurry` backed by a hidden
   output-only `MicFlurry Internal` mirror device.
-- Milestone 2 adds a foreground Rust process composed of `micflurry-control`, `micflurry-core`, and
-  `micflurry-tui`. Runtime logic stays independent of Ratatui and is reached through
-  `LocalControlClient`; do not add a daemon or socket before Milestone 3.
+- Milestone 2's Rust foreground runtime has been removed after the Swift core refactor. The retained
+  `micflurry-tui` is a demo UI and talks only to the public local control socket.
 - The first predefined BLE profile is Google ATVV v1. Audio notifications are high-nibble-first IMA
   ADPCM at 8 or 16 kHz and are resampled in userspace before standard CoreAudio output to
   `MicFlurry_2_UID`.
 - Runtime settings, known devices, and recording metadata live in SQLite. Optional recordings are
   mono Float32 WAV files. Clients must use the control abstraction rather than opening SQLite.
-- The foreground runtime reads the standard BLE Device Information Service and observes all IOHID
-  input values from the exact attached hardware UUID. Observation is non-exclusive by default.
-  Exclusive IOHID seizure and CGEvent forwarding require the explicit `--seize-hid` option and must
-  release the device on detach, disconnect, failure, and shutdown.
-- Milestone 3 keeps `micflurryd` as a per-user LaunchAgent. The final exclusive HID path may add a
-  separate root LaunchDaemon named `io.phateffect.MicFlurry.hid-helper`; it owns only IOHID seizure
+- The Swift daemon reads the standard BLE Device Information Service and correlates the exact
+  attached hardware UUID. Exclusive IOHID seizure belongs only to the helper and must release the
+  device on detach, disconnect, failure, and shutdown.
+- `micflurryd` is a per-user LaunchAgent. The separate root LaunchDaemon named
+  `io.phateffect.MicFlurry.hid-helper` owns only IOHID seizure
   and reports raw input to `micflurryd` over a private authenticated XPC boundary. Bluetooth,
   CoreAudio, SQLite, mapping policy, and CGEvent output remain in the per-user daemon.
-- Implement the Milestone 3 core processes, `micflurryd` and `micflurry-hid-helper`, in Swift. The
+- Implement the core processes, `micflurryd` and `micflurry-hid-helper`, in Swift. The
   AudioServerPlugIn remains the upstream-derived C++ driver, and UI/control clients remain language
-  independent. Preserve the current Rust Milestone 2 runtime as the hardware-validated behavioral
-  reference until the Swift acceptance matrix in `docs/TODO-swift-core.md` passes.
+  independent. Swift is the sole runtime implementation.
 - Target the Swift core services and service host at Apple Silicon (`arm64`) and macOS 15 or later.
   Intel and older macOS compatibility are outside the Swift migration scope.
 - Use `/Applications/MicFlurry.app` as the signed ServiceManagement host for the Swift LaunchAgent
   and LaunchDaemon even if no native UI is shipped. Core packages and public control contracts must
   not depend on TUI, web, or native UI concerns.
-- The planned remapping path is seizure-only. Do not add an IOHID-plus-CGEvent suppression fallback
+- The remapping path is seizure-only. Do not add an IOHID-plus-CGEvent suppression fallback
   unless the user explicitly changes this decision. Seize every IOHID interface matching the
   registered RC003 fingerprint and capture every raw report and decoded usage; do not require a
   per-button usage allowlist at the helper boundary.

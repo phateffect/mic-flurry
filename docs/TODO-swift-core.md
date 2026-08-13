@@ -1,9 +1,10 @@
-# Swift core migration TODO
+# Swift core migration status and release gates
 
-This document is the execution plan for replacing the Milestone 2 foreground Rust runtime with two
-independent Swift core services. Start this work from a clean worktree after the validated Milestone
-2/HID-probe branch has been merged. The existing Rust implementation is the behavioral reference
-until the Swift implementation passes the same automated and hardware checks.
+The Swift core refactor is implemented: `micflurryd` and `micflurry-hid-helper` are independent Swift
+services, and the replaced Rust Milestone 2 runtime has been removed. This document now
+records the completed migration work and the acceptance gates that still require release signing,
+notarization, multi-user validation, or additional hardware evidence. Those remaining distribution
+gates do not change Swift's status as the sole production core.
 
 ## Language and process decision
 
@@ -59,10 +60,9 @@ has a material advantage that outweighs another ABI boundary.
 
 - [x] Merge the validated Milestone 2/HID-probe commits into the target branch.
 - [x] Create a new worktree from that merged commit and verify `git status --short` is empty.
-- [x] Run `mise run rust-check`, `./scripts/check-patch.sh`, and
-  `./scripts/check-btleplug-patch.sh` to establish the reference baseline.
-- [x] Keep the current Rust runtime and its tests buildable until Swift parity is accepted. Do not
-  delete it merely to make the migration look complete.
+- [x] Establish the Rust prototype and driver-patch reference baseline before porting.
+- [x] Remove the replaced Rust runtime after Swift implementation and hardware validation; retain
+  only the independent Rust socket TUI demo.
 - [x] Do not reuse either discarded helper experiment. Define the Swift package and XPC contract
   cleanly from this document.
 
@@ -96,8 +96,8 @@ Current checkpoint: the Swift daemon composition now connects the ATVV session s
 streaming resampler, gain/metering, recording, SQLite owner, and an AUHAL output whose render
 callback consumes a preallocated SPSC buffer. The CoreBluetooth adapter retrieves only peripherals
 already connected by macOS, verifies the registered RC003 IOHID fingerprint, reads Device
-Information, and attaches with bounded rollback. Rust and Swift consume shared ATVV, resampling,
-and legacy-schema fixtures. On 2026-08-13, an RC003 hardware smoke test completed a 16 kHz ATVV
+Information, and attaches with bounded rollback. The accepted ATVV, resampling, and legacy-schema
+fixtures are now owned by the Swift tests. On 2026-08-13, an RC003 hardware smoke test completed a 16 kHz ATVV
 start/stream/stop session with 292 notifications, 70,080 decoded source samples, and zero dropped
 output samples. AVFoundation then captured 63,430 nonzero SInt16 samples from the visible
 `MicFlurry` input, proving the standard CoreAudio loopback path. The complete acceptance matrix,
@@ -116,9 +116,8 @@ outstanding.
   contended general-purpose lock.
 - [x] Port input gain, level metering, dropped-sample counters, optional Float32 WAV recording,
   button mappings, and status/event models.
-- [x] Create shared protocol fixtures and compare Swift results with the accepted Rust tests for
-  capability parsing, ADPCM output, sync recovery, resampling counts, mappings, and database
-  migrations.
+- [x] Preserve accepted protocol fixtures for capability parsing, ADPCM output, sync recovery,
+  resampling counts, mappings, and database migrations in the Swift test suite.
 
 ## Phase 3 — implement `micflurryd`
 
@@ -315,7 +314,6 @@ fast user switching, or signed public-release gates below.
 
 ## Completion gate
 
-The migration is complete only after the Swift daemon/helper satisfy the acceptance matrix on signed
-release-like bundles. At that point, decide in a separate reviewed change whether the Rust
-Milestone 2 runtime should be archived or removed. Passing unit tests alone is not permission to
-delete the hardware-validated reference implementation or the bounded root probe.
+The Swift refactor is complete and the replaced Rust runtime and bounded probe have been removed.
+The unchecked items above remain public-release and hardware-coverage gates; they do not introduce a
+second core implementation.

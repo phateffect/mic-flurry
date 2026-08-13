@@ -5,7 +5,7 @@ import Testing
 
 @testable import MicFlurryStorage
 
-@Test func persistsSettingsUsingRustCompatibleDefaultsAndSchema() throws {
+@Test func persistsSettingsUsingAcceptedDefaultsAndSchema() throws {
   let fixture = try DatabaseFixture()
   defer { fixture.remove() }
   let store = try Store(path: fixture.databaseURL)

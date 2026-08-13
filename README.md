@@ -87,13 +87,6 @@ differences: the USB transport type, the independent plug-in UUID, and output-ob
 the split mirror topology. Names, visibility, formats, and other customization are passed to
 `xcodebuild` by `scripts/build-driver.sh`.
 
-The Rust runtime uses the same upstream discipline for `btleplug`: the official source is pinned as
-an unmodified submodule at `upstream/btleplug`, while
-`patches/btleplug-macos-connected.patch` contains the small macOS-only extension for retrieving
-already connected peripherals and reporting the CoreBluetooth-derived ATT MTU. The `mise` Rust
-tasks materialize the patched dependency under the ignored `.build` directory before invoking
-Cargo.
-
 ## Clone and build
 
 Requirements: macOS with full Xcode installed (Command Line Tools alone are insufficient).
@@ -114,18 +107,20 @@ git submodule update --init --recursive
 The ad-hoc signed development driver is written to `build/MicFlurry.driver`. Distribution builds
 need to be signed with your Developer ID and notarized separately.
 
-The in-progress Swift core targets Apple Silicon and macOS 15 or later. Build and test both the
-Swift migration and the retained Rust behavioral reference with:
+The production core is implemented in Swift and targets Apple Silicon and macOS 15 or later. Build
+and test it with the standard project tasks:
 
 ```bash
-mise run swift-check
-mise run rust-check
-# or run both:
+mise run build
+mise run test
 mise run check
 ```
 
-These tasks keep Swift compiler, module, package, and security caches inside `.build` or
-MicFlurry-specific paths under `/tmp`.
+The optional Rust TUI is a socket demo client of the Swift daemon. Check it separately with
+`mise run demo-ui-check` when changing the control protocol or demo UI. All tasks keep Swift
+compiler, module, package, and security caches inside `.build` or MicFlurry-specific paths under
+`/tmp`. See [docs/development.md](docs/development.md) for the repository layout, focused tasks, and
+version overrides used by app builds.
 
 The Swift daemon exposes its versioned JSON-RPC 2.0 control service at
 `~/Library/Application Support/MicFlurry/run/control.sock`. It accepts multiple local clients,
@@ -202,49 +197,37 @@ git -C upstream/BlackHole checkout <new-commit-or-tag>
 Commit the new submodule pointer only after the patch check and a driver build pass. If the patch no
 longer applies, refresh only `patches/mic-flurry.patch`; do not edit the submodule working tree.
 
-## Updating btleplug
-
-```bash
-git -C upstream/btleplug fetch origin
-git -C upstream/btleplug checkout <new-commit-or-tag>
-./scripts/check-btleplug-patch.sh
-mise run rust-check
-```
-
-Keep `upstream/btleplug` pristine. If the patch no longer applies, refresh only
-`patches/btleplug-macos-connected.patch`, then commit the patch and submodule pointer together.
-
 ## Roadmap
 
 - Milestone 0: visible input + output loopback baseline
 - Milestone 1: visible input-only device backed by a hidden output-only mirror device (complete)
-- Milestone 2: foreground Rust Bluetooth-to-CoreAudio vertical slice (implemented and validated on
-  the registered `小米语音遥控器` hardware fingerprint)
+- Milestone 2: foreground Rust Bluetooth-to-CoreAudio vertical slice (historical prototype, replaced
+  by the Swift core)
+- Milestone 3: Swift per-user daemon, Swift HID helper, local control API, and service host core
+  implementation (complete; public Developer ID/notarization acceptance remains pending)
 
 The component boundaries, daemon/control API design, persistence decisions, and staged delivery plan
 are documented in [MILESTONES.md](MILESTONES.md).
 
-The next core-service implementation uses a Swift per-user daemon and a narrow Swift root HID helper
-while keeping every UI replaceable. The clean-worktree migration sequence and release acceptance
-matrix are recorded in [docs/TODO-swift-core.md](docs/TODO-swift-core.md).
+The core services use a Swift per-user daemon and a narrow Swift root HID helper while keeping every
+UI replaceable. The completed migration phases and remaining release acceptance matrix are recorded
+in [docs/TODO-swift-core.md](docs/TODO-swift-core.md).
 
 The final remapping design keeps `micflurryd` in the logged-in user's launchd session and delegates
-only exclusive RC003 IOHID capture to a narrow root helper. The current plan is seizure-only and does
-not include a CGEvent suppression fallback. Before that helper is implemented, the bounded root
-feasibility probe and its hardware checklist are documented in
-[docs/hid-seize-probe.md](docs/hid-seize-probe.md).
+only exclusive RC003 IOHID capture to a narrow root helper. The implementation is seizure-only and
+does not include a CGEvent suppression fallback.
 
-## Rust reference core and TUI client
+## Rust TUI demo client
 
-The Milestone 2 Rust runtime remains the hardware-validated behavioral reference. The Ratatui
-application is now a pure client of the Swift `micflurryd` Unix socket: it does not open SQLite,
-CoreBluetooth, CoreAudio, or IOHID itself, and quitting it does not stop daemon-owned work.
+The only retained Rust component is a Ratatui demo client for the Swift `micflurryd` Unix socket. It
+does not open SQLite, CoreBluetooth, CoreAudio, or IOHID, and quitting it does not stop daemon-owned
+work.
 
 Install the pinned toolchain and verify the workspace:
 
 ```bash
 mise install
-mise run rust-check
+mise run demo-ui-check
 ```
 
 Install and start the Swift services as described above, then run:
@@ -259,7 +242,7 @@ By default the client connects to
 list, the arrow keys and Return to attach, `d` to release, `r` to record, `h` to toggle exclusive
 HID capture, `<`/`>` to adjust persisted input gain, and `q` to quit.
 
-At startup the runtime asks CoreBluetooth for system-connected peripherals exposing the ATVV service.
+At startup the Swift daemon asks CoreBluetooth for system-connected peripherals exposing the ATVV service.
 It joins those UUIDs to read-only IOHID identity data and accepts only registered hardware
 fingerprints. The currently verified fingerprint is manufacturer `MIOM`, vendor ID `10007`, product
 ID `12984`; its observed product name is `小米语音遥控器`. The displayed name is not used for

@@ -324,7 +324,6 @@ pub trait ControlClient: Clone + Send + Sync + 'static {
     async fn stop_recording(&self) -> Result<()>;
     async fn start_hid_capture(&self) -> Result<()>;
     async fn stop_hid_capture(&self) -> Result<()>;
-    async fn keyboard_action(&self, action: KeyboardAction) -> Result<()>;
     fn subscribe(&self) -> EventStream;
 }
 
@@ -440,12 +439,6 @@ impl ControlClient for SocketControlClient {
 
     async fn stop_hid_capture(&self) -> Result<()> {
         self.request("v1.stop_hid_capture", None).await
-    }
-
-    async fn keyboard_action(&self, _action: KeyboardAction) -> Result<()> {
-        Err(ControlError::Invalid(
-            "keyboard injection is not part of control API v1".into(),
-        ))
     }
 
     fn subscribe(&self) -> EventStream {

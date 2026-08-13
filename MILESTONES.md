@@ -198,18 +198,13 @@ Grow into this layout only as each milestone needs it:
 
 ```text
 upstream/BlackHole/                   unmodified Git submodule
-upstream/btleplug/                    unmodified Git submodule
 patches/mic-flurry.patch              minimal driver patch
-patches/btleplug-macos-connected.patch CoreBluetooth retrieval and macOS MTU reporting patch
 scripts/                              driver build and verification
 packaging/                            package payload and installer scripts
 
-Cargo.toml                            current Rust reference runtime and clients
+Cargo.toml                            optional Rust demo UI
 crates/
-├── micflurry-core/                   current hardware-validated reference runtime
-├── micflurry-control/                client abstraction and protocol DTOs
-├── micflurry-hid-probe/              bounded development feasibility probe
-└── micflurry-tui/                    terminal client
+└── micflurry-tui/                    socket-only terminal demo client
 
 Package.swift                          Swift core packages and executables
 Sources/
@@ -220,16 +215,19 @@ Sources/
 ├── MicFlurryStorage/                 SQLite ownership and migrations
 ├── MicFlurryControl/                 public local JSON-RPC service
 ├── MicFlurryHIDProtocol/             private authenticated XPC contract
-├── micflurryd/                        per-user core service
-└── micflurry-hid-helper/              root-only IOHID seizure service
+├── MicFlurryDaemonCore/               per-user runtime composition
+├── MicFlurryDaemon/                   `micflurryd` executable
+├── MicFlurryHIDHelperCore/            root-helper capture and XPC service
+├── MicFlurryHIDHelper/                `micflurry-hid-helper` executable
+└── MicFlurryServiceHost/              ServiceManagement host executable
 
-apps/MicFlurry/                        signed service host; native UI optional
+packaging/swift-app/                   signed service-host templates; native UI optional
 docs/control-api.md                   added when the socket API is made public
 docs/TODO-swift-core.md                executable migration and acceptance plan
 ```
 
-The Swift services and service host target Apple Silicon (`arm64`) and macOS 15 or later. The
-existing Rust runtime remains a behavioral reference rather than a second production core.
+The Swift services and service host target Apple Silicon (`arm64`) and macOS 15 or later. Swift is
+the only production core; the Rust TUI is a replaceable control-socket demo client.
 
 Core packages and the control contract must not depend on a particular UI. Exact module boundaries
 can be adjusted when implementation reveals a cleaner dependency graph; the process and ownership
@@ -362,26 +360,27 @@ validation work.
   60 seconds. Add adaptive clock recovery only if measurements require it or the product later adds
   long-running continuous capture.
 
-This milestone is complete only when an ESP32-S3 prototype streams live audio into the current
-foreground Rust runtime and a consumer records intelligible audio from visible `MicFlurry`. It does
+This milestone is complete only when an ESP32-S3 prototype streams live audio into the Swift daemon
+and a consumer records intelligible audio from visible `MicFlurry`. It does
 not include reliable stored-recording transfer, OTA, a daemon, or a custom driver IPC path.
 
 ### Milestone 3 — independent daemon and public local API
 
-- Implement `micflurryd` and `micflurry-hid-helper` as the Swift core described in
-  [docs/TODO-swift-core.md](docs/TODO-swift-core.md). Preserve the current Rust runtime as the
-  hardware-validated behavioral reference until the Swift acceptance matrix passes.
-- Run `micflurryd` as a per-user LaunchAgent, not as root.
+- `micflurryd` and `micflurry-hid-helper` are implemented as the Swift core described in
+  [docs/TODO-swift-core.md](docs/TODO-swift-core.md). The replaced Rust runtime has been removed;
+  outstanding release gates are tracked in that document.
+- `micflurryd` runs as a per-user LaunchAgent, not as root. (Done.)
 - Implement `SocketControlClient` and the versioned Unix socket protocol described above. (Done.)
 - Convert the TUI into a normal socket client with no direct SQLite, Bluetooth, or CoreAudio access.
   (Done; quitting the client leaves daemon-owned work running.)
-- After the root probe validates exclusive capture, add the narrow root `micflurry-hid-helper` and
+- The narrow root `micflurry-hid-helper` and
   its private authenticated XPC protocol. It seizes all interfaces matching the registered RC003
   fingerprint atomically and streams all raw reports/usages; `micflurryd` owns mapping and CGEvent
-  output. Do not add a suppression fallback in this milestone.
-- Add launchd lifecycle integration, API documentation, schemas, and reference clients.
-- Verify simultaneous TUI and third-party clients, reconnect behavior, migrations, permissions,
-  helper crash/lease release, fast user switching, and that UI exit never stops active daemon work.
+  output. No suppression fallback was added. (Done for the private distribution route.)
+- Launchd lifecycle integration, API documentation, schemas, and reference clients are implemented.
+- Simultaneous clients, reconnect behavior, migrations, helper crash/lease release, and UI-independent
+  daemon ownership are validated. Developer ID/notarization, fast user switching, and the remaining
+  hardware acceptance cases are release gates rather than core-refactor work.
 
 ### Milestone 4 — optional clients and product packaging
 

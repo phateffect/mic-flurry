@@ -1,7 +1,7 @@
 import MicFlurryDomain
 import Testing
 
-@Test func settingsPreserveValidatedRustDefaults() {
+@Test func settingsPreserveValidatedDefaults() {
   let settings = Settings(recordingDirectory: "/tmp/recordings")
   #expect(settings.injectionDeviceUID == "MicFlurry_2_UID")
   #expect(settings.outputRateHz == 48_000)

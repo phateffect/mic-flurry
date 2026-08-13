@@ -5,7 +5,7 @@
 > 2026-08-13 状态说明：本文是实现前的协议调研，第三方资料中的 `RC003/ARN9` 名称不用于
 > MicFlurry 设备识别。当前实机由 IOHID 报告为 `小米语音遥控器`，受支持指纹是 manufacturer
 > `MIOM`、vendor ID `10007`、product ID `12984`；当前实现和验收事实以
-> `docs/milestone-2.md` 为准。
+> `docs/TODO-swift-core.md` 为准。
 
 ## 结论摘要
 
@@ -211,7 +211,7 @@ ADPCM 是有状态编码（predictor + step index 贯穿全流），丢一帧即
 
 milestone-2 规划（`ATVV remote → CoreBluetooth → IMA ADPCM decoder → streaming resampler → AUHAL → MicFlurry_2_UID`）与 open-voice-bridge 的已验证架构一致。行动项：
 
-1. **参考实现**：ovb 的 `ATVVProtocol.swift`（156 行：能力协商 + 解码器 + FrameAccumulator + 会话门）可直接作为 `micflurry-core` ATVV profile 的移植蓝本（Rust）。注意其只接受 16kHz，MicFlurry 需补 8kHz + SRC。
+1. **历史参考**：ovb 的 `ATVVProtocol.swift`（156 行：能力协商 + 解码器 + FrameAccumulator + 会话门）曾作为 ATVV 实现的移植蓝本。注意其只接受 16kHz，MicFlurry 还需要 8kHz + SRC。
 2. **AUDIO_SYNC 必须实现**，否则丢帧后解码器持续错位。
 3. **后处理（去 click + LPF + RMS 归一化）**：16kHz SInt16 → Float32 转换前建议做，否则录进 WAV 的波形过小（RMS ≈ 236 vs 目标 10000）。
 4. **结束边界**：部分遥控器松键不发 AUDIO_STOP 而是**重发 START_SEARCH**，两种都要处理；ovb 还处理了 300ms 内的隐式音频竞态。

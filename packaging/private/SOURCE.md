@@ -1,8 +1,8 @@
 # Corresponding source
 
 This private MicFlurry package includes its exact corresponding source in the adjacent `Source`
-directory. The snapshot contains the Swift and Rust implementations, the BlackHole and btleplug
-upstream sources, MicFlurry patches, package manifests, fixtures, and build/install scripts used for
+directory. The snapshot contains the Swift implementation, optional Rust TUI demo, BlackHole
+upstream source, MicFlurry patch, package manifests, fixtures, and build/install scripts used for
 this binary.
 
 The canonical project repository is <https://github.com/phateffect/mic-flurry>. The source snapshot
