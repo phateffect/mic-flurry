@@ -1,7 +1,7 @@
 # MicFlurry milestones
 
 This document records the planned architecture and delivery sequence discussed on 2026-08-11 and
-refined on 2026-08-12. It describes future work, not necessarily the behavior of the current
+refined through 2026-08-13. It describes future work, not necessarily the behavior of the current
 release. `README.md` and `AGENTS.md` remain authoritative for what is implemented today.
 
 ## Product boundary
@@ -14,8 +14,9 @@ MicFlurry Core
 └── micflurryd             Bluetooth, audio, persistence, and control service
 
 Optional clients
-├── CLI / TUI              Rust
-├── tray app               Swift
+├── CLI / TUI              any language
+├── tray / native app      any language
+├── web UI                 any language
 └── third-party clients    any language that can use a Unix socket
 ```
 
@@ -29,13 +30,16 @@ all components, but it installs the active HAL plug-in outside the app bundle:
 ```text
 MicFlurry.pkg
 ├── /Library/Audio/Plug-Ins/HAL/MicFlurry.driver
-├── per-user micflurryd service
-├── root micflurry-hid-helper                       optional until seizure is validated
-└── /Applications/MicFlurry.app             optional Swift tray client
+└── /Applications/MicFlurry.app                     signed service host
+    ├── per-user Swift micflurryd service
+    ├── root Swift micflurry-hid-helper
+    └── optional native UI
 ```
 
-Headless installation of the driver and daemon must remain possible. TUI and tray packaging may be
-offered separately once maintaining multiple artifacts is useful.
+Headless operation of the driver and daemon must remain possible. The `.app` is the modern
+ServiceManagement host and does not imply that a native UI must run or even be shipped. TUI, CLI,
+web, and native UI packaging may be offered separately once maintaining multiple artifacts is
+useful.
 
 ## Runtime architecture
 
@@ -200,21 +204,32 @@ patches/btleplug-macos-connected.patch CoreBluetooth retrieval and macOS MTU rep
 scripts/                              driver build and verification
 packaging/                            package payload and installer scripts
 
-Cargo.toml                            Rust workspace, added with runtime work
+Cargo.toml                            current Rust reference runtime and clients
 crates/
-├── micflurry-core/                   Bluetooth, audio, recording, domain logic
+├── micflurry-core/                   current hardware-validated reference runtime
 ├── micflurry-control/                client abstraction and protocol DTOs
-├── micflurry-daemon/                 daemon executable and socket server
-├── micflurry-hid-helper/             future root-only IOHID seizure service
 ├── micflurry-hid-probe/              bounded development feasibility probe
 └── micflurry-tui/                    terminal client
 
-apps/MicFlurryTray/                   future Swift tray application
+Package.swift                          future Swift core packages and executables
+Sources/
+├── MicFlurryDomain/                  core state and language-independent DTOs
+├── MicFlurryATVV/                    ATVV protocol and audio decode
+├── MicFlurryAudio/                   CoreAudio adapter and streaming buffer
+├── MicFlurryBluetooth/               CoreBluetooth adapter
+├── MicFlurryStorage/                 SQLite ownership and migrations
+├── MicFlurryControl/                 public local JSON-RPC service
+├── MicFlurryHIDProtocol/             private authenticated XPC contract
+├── micflurryd/                        per-user core service
+└── micflurry-hid-helper/              root-only IOHID seizure service
+
+apps/MicFlurry/                        signed service host; native UI optional
 docs/control-api.md                   added when the socket API is made public
+docs/TODO-swift-core.md                executable migration and acceptance plan
 ```
 
-Core and control crates must not depend on terminal or Swift UI concerns. Exact crate boundaries can
-be adjusted when implementation reveals a cleaner dependency graph; the process and ownership
+Core packages and the control contract must not depend on a particular UI. Exact module boundaries
+can be adjusted when implementation reveals a cleaner dependency graph; the process and ownership
 boundaries above should remain stable.
 
 ## Planned component identities
@@ -222,10 +237,10 @@ boundaries above should remain stable.
 Reserve these identifiers for the component split:
 
 - Driver: `io.phateffect.MicFlurry.driver`
-- Rust daemon / launchd service: `io.phateffect.MicFlurry.daemon`
+- Swift daemon / launchd service: `io.phateffect.MicFlurry.daemon`
 - Root HID helper: `io.phateffect.MicFlurry.hid-helper`
 - Rust TUI: `io.phateffect.MicFlurry.tui`
-- Swift tray app: `io.phateffect.MicFlurry.tray`
+- Service host / optional native UI: `io.phateffect.MicFlurry.app`
 
 This is a future migration. The current driver, package receipt, scripts, installed bundle, and
 published v0.1 release still use `io.phateffect.MicFlurry`. Change and validate all affected
@@ -350,7 +365,9 @@ not include reliable stored-recording transfer, OTA, a daemon, or a custom drive
 
 ### Milestone 3 — independent daemon and public local API
 
-- Extract `micflurryd` from the foreground runtime and run it independently of all UIs.
+- Implement `micflurryd` and `micflurry-hid-helper` as the Swift core described in
+  [docs/TODO-swift-core.md](docs/TODO-swift-core.md). Preserve the current Rust runtime as the
+  hardware-validated behavioral reference until the Swift acceptance matrix passes.
 - Run `micflurryd` as a per-user LaunchAgent, not as root.
 - Implement `SocketControlClient` and the versioned Unix socket protocol described above.
 - Convert the TUI into a normal socket client with no direct SQLite, Bluetooth, or CoreAudio access.
@@ -362,15 +379,16 @@ not include reliable stored-recording transfer, OTA, a daemon, or a custom drive
 - Verify simultaneous TUI and third-party clients, reconnect behavior, migrations, permissions,
   helper crash/lease release, fast user switching, and that UI exit never stops active daemon work.
 
-### Milestone 4 — Swift tray and product packaging
+### Milestone 4 — optional clients and product packaging
 
-- Build a Swift tray app using the same public control API; do not duplicate daemon business logic.
-- Package driver, independent daemon, and optional tray into a coherent installer while preserving
-  headless installation.
+- Build optional TUI, CLI, web, or native clients using the same public control API; do not duplicate
+  daemon business logic.
+- Package the driver, independent core services, service host, and any optional clients into coherent
+  artifacts while preserving headless operation.
 - Add upgrade and uninstall handling for the HAL plug-in, launchd service, database, and application.
 - Pursue Developer ID signing, notarization, and low-friction Homebrew distribution only when the
   project is ready to pay for and maintain the required Apple release credentials.
 
-The tray is intentionally deferred until the foreground Rust path and daemon boundary are stable.
-This keeps the first implementation inspectable and avoids making `.app` lifecycle decisions before
-the service behavior is proven.
+Polished clients are intentionally deferred until the Swift daemon/helper boundary and public API
+are stable. The signed `.app` service host is packaging infrastructure and must not couple the core
+to a particular UI.

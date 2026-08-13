@@ -154,6 +154,13 @@ installer; `sudo killall coreaudiod` is the faster development path.
   separate root LaunchDaemon named `io.phateffect.MicFlurry.hid-helper`; it owns only IOHID seizure
   and reports raw input to `micflurryd` over a private authenticated XPC boundary. Bluetooth,
   CoreAudio, SQLite, mapping policy, and CGEvent output remain in the per-user daemon.
+- Implement the Milestone 3 core processes, `micflurryd` and `micflurry-hid-helper`, in Swift. The
+  AudioServerPlugIn remains the upstream-derived C++ driver, and UI/control clients remain language
+  independent. Preserve the current Rust Milestone 2 runtime as the hardware-validated behavioral
+  reference until the Swift acceptance matrix in `docs/TODO-swift-core.md` passes.
+- Use `/Applications/MicFlurry.app` as the signed ServiceManagement host for the Swift LaunchAgent
+  and LaunchDaemon even if no native UI is shipped. Core packages and public control contracts must
+  not depend on TUI, web, or native UI concerns.
 - The planned remapping path is seizure-only. Do not add an IOHID-plus-CGEvent suppression fallback
   unless the user explicitly changes this decision. Seize every IOHID interface matching the
   registered RC003 fingerprint and capture every raw report and decoded usage; do not require a
@@ -161,7 +168,8 @@ installer; `sudo killall coreaudiod` is the faster development path.
 - Additional GATT profiles may be added behind the same runtime/control boundaries after ATVV
   hardware validation; do not couple profile-specific code to the TUI.
 
-Do not begin BLE/GATT or custom driver IPC work unless the user explicitly advances the roadmap.
+Do not add custom driver IPC or move PCM away from standard CoreAudio unless the user explicitly
+changes the product contract.
 
 ## Licensing and branding
 

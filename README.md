@@ -202,6 +202,10 @@ Keep `upstream/btleplug` pristine. If the patch no longer applies, refresh only
 The component boundaries, daemon/control API design, persistence decisions, and staged delivery plan
 are documented in [MILESTONES.md](MILESTONES.md).
 
+The next core-service implementation uses a Swift per-user daemon and a narrow Swift root HID helper
+while keeping every UI replaceable. The clean-worktree migration sequence and release acceptance
+matrix are recorded in [docs/TODO-swift-core.md](docs/TODO-swift-core.md).
+
 The final remapping design keeps `micflurryd` in the logged-in user's launchd session and delegates
 only exclusive RC003 IOHID capture to a narrow root helper. The current plan is seizure-only and does
 not include a CGEvent suppression fallback. Before that helper is implemented, the bounded root
