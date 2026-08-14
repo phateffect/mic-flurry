@@ -227,6 +227,7 @@ pub struct HidInput {
 pub enum KeyboardSource {
     Tui,
     Hid,
+    Audio,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -280,6 +281,8 @@ pub enum KeyboardAction {
     VolumeDown,
     VolumeUp,
     Mute,
+    DictationStart,
+    DictationEnd,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]

@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use control::{
-    AudioStatus, ControlClient, DeviceInfo, Event, HidStatus, SettingsChange, SocketControlClient,
-    Status,
+    AudioStatus, ControlClient, DeviceInfo, Event, HidStatus, KeyboardAction, KeyboardSource,
+    SettingsChange, SocketControlClient, Status,
 };
 use crossterm::{
     event::{Event as TerminalEvent, EventStream, KeyCode, KeyEventKind},
@@ -220,7 +220,13 @@ struct App {
 impl App {
     fn apply(&mut self, event: Event) {
         match event {
-            Event::Status { status } => self.status = *status,
+            Event::Status { status } => {
+                let mut status = *status;
+                // recent_outputs is accumulated locally from keyboard_output events;
+                // the daemon's status broadcast does not carry it, so keep ours.
+                status.hid.recent_outputs = std::mem::take(&mut self.status.hid.recent_outputs);
+                self.status = status;
+            }
             Event::Attaching { active, .. } => self.status.attaching = active,
             Event::Error { message } => self.message = message,
             Event::RecordingStarted { path } => self.message = format!("Recording {path}"),
@@ -385,7 +391,11 @@ fn draw(frame: &mut ratatui::Frame<'_>, app: &mut App) {
 
     let diagnostics = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(45), Constraint::Percentage(55)])
+        .constraints([
+            Constraint::Percentage(34),
+            Constraint::Percentage(33),
+            Constraint::Percentage(33),
+        ])
         .split(rows[2]);
     frame.render_widget(
         Paragraph::new(format_device_info(app.status.device_info.as_ref())).block(
@@ -396,12 +406,17 @@ fn draw(frame: &mut ratatui::Frame<'_>, app: &mut App) {
         diagnostics[0],
     );
     frame.render_widget(
-        Paragraph::new(format_hid_status(&app.status.hid)).block(
+        Paragraph::new(format_hid_status(&app.status.hid))
+            .block(Block::default().title(" HID input ").borders(Borders::ALL)),
+        diagnostics[1],
+    );
+    frame.render_widget(
+        Paragraph::new(format_cgevent_outputs(&app.status.hid)).block(
             Block::default()
-                .title(" HID input / CGEvent output ")
+                .title(" CGEvent output ")
                 .borders(Borders::ALL),
         ),
-        diagnostics[1],
+        diagnostics[2],
     );
 
     let error = app.status.last_error.as_deref().unwrap_or("none");
@@ -486,7 +501,7 @@ fn format_hid_status(hid: &HidStatus) -> String {
             .as_ref()
             .map_or_else(String::new, |error| format!(" · {error}"))
     )];
-    lines.extend(hid.recent_inputs.iter().rev().take(2).map(|input| {
+    lines.extend(hid.recent_inputs.iter().rev().take(4).map(|input| {
         format!(
             "IN #{:04} {:04x}/{:04x} {}={} {}{}",
             input.sequence,
@@ -497,19 +512,66 @@ fn format_hid_status(hid: &HidStatus) -> String {
             if input.pressed { "press" } else { "release" },
             input
                 .mapped_action
-                .map_or_else(String::new, |action| format!(" → {action:?}"))
-        )
-    }));
-    lines.extend(hid.recent_outputs.iter().rev().take(1).map(|output| {
-        format!(
-            "OUT #{:04} {:?} → {:?} {}",
-            output.sequence,
-            output.source,
-            output.action,
-            if output.succeeded { "sent" } else { "failed" }
+                .map_or_else(String::new, |action| format!(
+                    " → {}",
+                    keyboard_action_label(action)
+                ))
         )
     }));
     lines.join("\n")
+}
+
+fn format_cgevent_outputs(hid: &HidStatus) -> String {
+    if hid.recent_outputs.is_empty() {
+        return "No CGEvent posted yet.".into();
+    }
+    hid.recent_outputs
+        .iter()
+        .rev()
+        .take(5)
+        .map(|output| {
+            format!(
+                "OUT #{:04} {} → {} {}{}",
+                output.sequence,
+                keyboard_source_label(output.source),
+                keyboard_action_label(output.action),
+                if output.succeeded { "sent" } else { "failed" },
+                output
+                    .error
+                    .as_ref()
+                    .map_or_else(String::new, |error| format!(" · {error}"))
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn keyboard_source_label(source: KeyboardSource) -> &'static str {
+    match source {
+        KeyboardSource::Tui => "tui",
+        KeyboardSource::Hid => "hid",
+        KeyboardSource::Audio => "audio",
+    }
+}
+
+fn keyboard_action_label(action: KeyboardAction) -> &'static str {
+    match action {
+        KeyboardAction::Up => "up",
+        KeyboardAction::Down => "down",
+        KeyboardAction::Left => "left",
+        KeyboardAction::Right => "right",
+        KeyboardAction::Select => "select",
+        KeyboardAction::Back => "back",
+        KeyboardAction::Home => "home",
+        KeyboardAction::PlayPause => "play_pause",
+        KeyboardAction::Previous => "previous",
+        KeyboardAction::Next => "next",
+        KeyboardAction::VolumeDown => "volume_down",
+        KeyboardAction::VolumeUp => "volume_up",
+        KeyboardAction::Mute => "mute",
+        KeyboardAction::DictationStart => "dictation_start fn+ctrl",
+        KeyboardAction::DictationEnd => "dictation_end fn",
+    }
 }
 
 fn format_optional_hex(value: Option<u32>) -> String {
