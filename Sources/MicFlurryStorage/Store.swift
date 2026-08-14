@@ -63,8 +63,17 @@ public final class Store {
       inputGainDB: Float(try value(for: "input_gain_db") ?? "") ?? 12,
       recordingDirectory: try value(for: "recording_directory")
         ?? musicDirectory.appendingPathComponent("MicFlurry", isDirectory: true).path,
-      autoRecord: try value(for: "auto_record") == "true"
+      autoRecord: try value(for: "auto_record") == "true",
+      dictationStartChord: try value(for: "dictation_start_chord") ?? "fn",
+      dictationEndChord: try value(for: "dictation_end_chord") ?? "",
+      dictationMode: try value(for: "dictation_mode") ?? "hold",
+      actionChords: Self.decodeActionChords(try value(for: "action_chords"))
     )
+  }
+
+  private static func decodeActionChords(_ text: String?) -> [String: String] {
+    guard let text, let data = text.data(using: .utf8) else { return [:] }
+    return (try? JSONDecoder().decode([String: String].self, from: data)) ?? [:]
   }
 
   @discardableResult
@@ -91,6 +100,30 @@ public final class Store {
       }
       if let enabled = change.autoRecord {
         try set(key: "auto_record", value: enabled ? "true" : "false")
+      }
+      if let chord = change.dictationStartChord {
+        try set(
+          key: "dictation_start_chord",
+          value: chord.trimmingCharacters(in: .whitespacesAndNewlines)
+        )
+      }
+      if let chord = change.dictationEndChord {
+        try set(
+          key: "dictation_end_chord",
+          value: chord.trimmingCharacters(in: .whitespacesAndNewlines)
+        )
+      }
+      if let mode = change.dictationMode {
+        try set(
+          key: "dictation_mode",
+          value: mode.trimmingCharacters(in: .whitespacesAndNewlines)
+        )
+      }
+      if let actionChords = change.actionChords {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        let data = try encoder.encode(actionChords)
+        try set(key: "action_chords", value: String(decoding: data, as: UTF8.self))
       }
     }
     return try settings()

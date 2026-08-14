@@ -123,6 +123,8 @@ public enum KeyboardAction: String, Codable, CaseIterable, Sendable {
   case volumeDown = "volume_down"
   case volumeUp = "volume_up"
   case mute
+  case dictationStart = "dictation_start"
+  case dictationEnd = "dictation_end"
 }
 
 public enum HIDCaptureMode: String, Codable, Sendable {
@@ -170,6 +172,7 @@ public struct HIDInput: Codable, Equatable, Sendable {
 public enum KeyboardSource: String, Codable, Sendable {
   case tui
   case hid
+  case audio
 }
 
 public struct KeyboardOutput: Codable, Equatable, Sendable {
@@ -232,19 +235,35 @@ public struct Settings: Codable, Equatable, Sendable {
   public var inputGainDB: Float
   public var recordingDirectory: String
   public var autoRecord: Bool
+  public var dictationStartChord: String
+  public var dictationEndChord: String
+  /// "hold" keeps dictationStartChord pressed for the whole session;
+  /// "tap" taps dictationStartChord at start and dictationEndChord at end.
+  public var dictationMode: String
+  /// HID action (KeyboardAction raw value, e.g. "volume_up") to key chord.
+  /// An empty chord disables the mapping.
+  public var actionChords: [String: String]
 
   public init(
     injectionDeviceUID: String = "MicFlurry_2_UID",
     outputRateHz: UInt32 = 48_000,
     inputGainDB: Float = 12,
     recordingDirectory: String,
-    autoRecord: Bool = false
+    autoRecord: Bool = false,
+    dictationStartChord: String = "fn",
+    dictationEndChord: String = "",
+    dictationMode: String = "hold",
+    actionChords: [String: String] = [:]
   ) {
     self.injectionDeviceUID = injectionDeviceUID
     self.outputRateHz = outputRateHz
     self.inputGainDB = inputGainDB
     self.recordingDirectory = recordingDirectory
     self.autoRecord = autoRecord
+    self.dictationStartChord = dictationStartChord
+    self.dictationEndChord = dictationEndChord
+    self.dictationMode = dictationMode
+    self.actionChords = actionChords
   }
 }
 
@@ -254,19 +273,32 @@ public struct SettingsChange: Codable, Equatable, Sendable {
   public var inputGainDB: Float?
   public var recordingDirectory: String?
   public var autoRecord: Bool?
+  public var dictationStartChord: String?
+  public var dictationEndChord: String?
+  public var dictationMode: String?
+  /// Replaces the whole action-to-chord map when present.
+  public var actionChords: [String: String]?
 
   public init(
     injectionDeviceUID: String? = nil,
     outputRateHz: UInt32? = nil,
     inputGainDB: Float? = nil,
     recordingDirectory: String? = nil,
-    autoRecord: Bool? = nil
+    autoRecord: Bool? = nil,
+    dictationStartChord: String? = nil,
+    dictationEndChord: String? = nil,
+    dictationMode: String? = nil,
+    actionChords: [String: String]? = nil
   ) {
     self.injectionDeviceUID = injectionDeviceUID
     self.outputRateHz = outputRateHz
     self.inputGainDB = inputGainDB
     self.recordingDirectory = recordingDirectory
     self.autoRecord = autoRecord
+    self.dictationStartChord = dictationStartChord
+    self.dictationEndChord = dictationEndChord
+    self.dictationMode = dictationMode
+    self.actionChords = actionChords
   }
 }
 
@@ -275,10 +307,14 @@ public enum SettingsValidationError: Error, Equatable, Sendable {
   case unsupportedOutputRate(UInt32)
   case invalidInputGain(Float)
   case emptyRecordingDirectory
+  case invalidKeyChord(String)
+  case invalidDictationMode(String)
+  case invalidChordAction(String)
 }
 
 public enum SettingsValidator {
   public static let supportedOutputRates: Set<UInt32> = [8_000, 16_000, 44_100, 48_000]
+  public static let dictationModes: Set<String> = ["hold", "tap"]
 
   public static func validate(_ change: SettingsChange) throws {
     if let uid = change.injectionDeviceUID,
@@ -296,6 +332,31 @@ public enum SettingsValidator {
       directory.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     {
       throw SettingsValidationError.emptyRecordingDirectory
+    }
+    for chord in [change.dictationStartChord, change.dictationEndChord] {
+      if let chord {
+        let trimmed = chord.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmed.isEmpty && KeyChord(parsing: trimmed) == nil {
+          throw SettingsValidationError.invalidKeyChord(chord)
+        }
+      }
+    }
+    if let mode = change.dictationMode,
+      !dictationModes.contains(mode.trimmingCharacters(in: .whitespacesAndNewlines))
+    {
+      throw SettingsValidationError.invalidDictationMode(mode)
+    }
+    if let actionChords = change.actionChords {
+      let actions = Set(KeyboardAction.allCases.map(\.rawValue))
+      for (action, chord) in actionChords {
+        guard actions.contains(action) else {
+          throw SettingsValidationError.invalidChordAction(action)
+        }
+        let trimmed = chord.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmed.isEmpty && KeyChord(parsing: trimmed) == nil {
+          throw SettingsValidationError.invalidKeyChord(chord)
+        }
+      }
     }
   }
 }

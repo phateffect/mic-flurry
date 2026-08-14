@@ -16,10 +16,12 @@ import Testing
   defer { try? FileManager.default.removeItem(at: directory) }
   let bluetooth = FakeBluetooth()
   let sink = MemoryAudioSink()
+  let keyChords = FakeKeyChordPoster()
   let runtime = try DaemonRuntime(
     databaseURL: directory.appendingPathComponent("state.db"),
     bluetooth: bluetooth,
-    audioSinkFactory: { _ in sink }
+    audioSinkFactory: { _ in sink },
+    keyChords: keyChords
   )
 
   try await runtime.refreshDevices()
@@ -40,6 +42,7 @@ import Testing
   #expect(runtime.status.audio.decodedFrames == 240)
   #expect(!sink.samples.isEmpty)
   #expect(bluetooth.commands == [ATVV.getCapabilities])
+  #expect(keyChords.log == ["down:fn"])
 }
 
 @MainActor
@@ -47,10 +50,12 @@ import Testing
   let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
   defer { try? FileManager.default.removeItem(at: directory) }
   let bluetooth = FakeBluetooth()
+  let keyChords = FakeKeyChordPoster()
   let runtime = try DaemonRuntime(
     databaseURL: directory.appendingPathComponent("state.db"),
     bluetooth: bluetooth,
-    audioSinkFactory: { _ in MemoryAudioSink() }
+    audioSinkFactory: { _ in MemoryAudioSink() },
+    keyChords: keyChords
   )
 
   try await runtime.refreshDevices()
@@ -67,6 +72,141 @@ import Testing
   #expect(runtime.status.connectedDevice == nil)
   #expect(!runtime.status.audio.active)
   #expect(runtime.status.devices.allSatisfy { !$0.connected })
+  #expect(keyChords.log == ["down:fn", "up:fn"])
+}
+
+@MainActor
+@Test func postsDictationKeysAroundAudioSession() async throws {
+  let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+  defer { try? FileManager.default.removeItem(at: directory) }
+  let bluetooth = FakeBluetooth()
+  let keyChords = FakeKeyChordPoster()
+  let runtime = try DaemonRuntime(
+    databaseURL: directory.appendingPathComponent("state.db"),
+    bluetooth: bluetooth,
+    audioSinkFactory: { _ in MemoryAudioSink() },
+    keyChords: keyChords
+  )
+
+  try await runtime.refreshDevices()
+  try await runtime.connect(to: FakeBluetooth.deviceID)
+  #expect(keyChords.log.isEmpty)
+
+  await runtime.handleBluetoothEvent(
+    .control(device: FakeBluetooth.deviceID, bytes: [0x04, 0x03, 0x02, 0x2a])
+  )
+  #expect(keyChords.log == ["down:fn"])
+
+  await runtime.handleBluetoothEvent(
+    .control(device: FakeBluetooth.deviceID, bytes: [0x00, 0x00])
+  )
+  #expect(keyChords.log == ["down:fn", "up:fn"])
+}
+
+@MainActor
+@Test func tapModeTapsStartAndEndChords() async throws {
+  let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+  defer { try? FileManager.default.removeItem(at: directory) }
+  let bluetooth = FakeBluetooth()
+  let keyChords = FakeKeyChordPoster()
+  let runtime = try DaemonRuntime(
+    databaseURL: directory.appendingPathComponent("state.db"),
+    bluetooth: bluetooth,
+    audioSinkFactory: { _ in MemoryAudioSink() },
+    keyChords: keyChords
+  )
+  _ = try runtime.controlSetSettings(
+    SettingsChange(dictationStartChord: "fn", dictationEndChord: "shift", dictationMode: "tap")
+  )
+
+  try await runtime.refreshDevices()
+  try await runtime.connect(to: FakeBluetooth.deviceID)
+
+  await runtime.handleBluetoothEvent(
+    .control(device: FakeBluetooth.deviceID, bytes: [0x04, 0x03, 0x02, 0x2a])
+  )
+  #expect(keyChords.log == ["tap:fn"])
+
+  await runtime.handleBluetoothEvent(
+    .control(device: FakeBluetooth.deviceID, bytes: [0x00, 0x00])
+  )
+  #expect(keyChords.log == ["tap:fn", "tap:shift"])
+}
+
+@MainActor
+@Test func postsDictationEndWhenBluetoothDisconnectsMidSession() async throws {
+  let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+  defer { try? FileManager.default.removeItem(at: directory) }
+  let bluetooth = FakeBluetooth()
+  let keyChords = FakeKeyChordPoster()
+  let runtime = try DaemonRuntime(
+    databaseURL: directory.appendingPathComponent("state.db"),
+    bluetooth: bluetooth,
+    audioSinkFactory: { _ in MemoryAudioSink() },
+    keyChords: keyChords
+  )
+
+  try await runtime.refreshDevices()
+  try await runtime.connect(to: FakeBluetooth.deviceID)
+  await runtime.handleBluetoothEvent(
+    .control(device: FakeBluetooth.deviceID, bytes: [0x04, 0x03, 0x02, 0x2a])
+  )
+  #expect(keyChords.log == ["down:fn"])
+
+  await runtime.handleBluetoothEvent(.disconnected(FakeBluetooth.deviceID))
+  #expect(keyChords.log == ["down:fn", "up:fn"])
+
+  // A disconnect without an active session must not post again.
+  await runtime.handleBluetoothEvent(.disconnected(FakeBluetooth.deviceID))
+  #expect(keyChords.log == ["down:fn", "up:fn"])
+}
+
+@MainActor
+@Test func seizedKeysPostConfiguredChords() async throws {
+  let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+  defer { try? FileManager.default.removeItem(at: directory) }
+  let bluetooth = FakeBluetooth()
+  let helperTransport = FakeHIDTransport()
+  let helperClient = HIDHelperClient(transport: helperTransport)
+  let keyChords = FakeKeyChordPoster()
+  let runtime = try DaemonRuntime(
+    databaseURL: directory.appendingPathComponent("state.db"),
+    bluetooth: bluetooth,
+    hidClient: helperClient,
+    audioSinkFactory: { _ in MemoryAudioSink() },
+    keyChords: keyChords
+  )
+  _ = try runtime.controlSetSettings(
+    SettingsChange(actionChords: ["volume_up": "a", "volume_down": "b", "select": "return"])
+  )
+  runtime.start()
+  try await runtime.refreshDevices()
+  try await runtime.connect(to: FakeBluetooth.deviceID)
+  try await runtime.startHIDCapture()
+
+  func emit(_ usage: UInt32, _ value: Int64) {
+    helperTransport.emit(
+      .capture(
+        HIDCaptureEvent(
+          sequence: 1,
+          monotonicNanoseconds: 0,
+          physicalDeviceID: FakeBluetooth.deviceID.rawValue,
+          interfaceIndex: 0,
+          kind: .value(usagePage: 0x0c, usage: usage, value: value)
+        )
+      )
+    )
+  }
+  emit(0xe9, 1)
+  await waitUntil { keyChords.log.count == 1 }
+  emit(0xea, 1)
+  await waitUntil { keyChords.log.count == 2 }
+  emit(0x41, 1)
+  await waitUntil { keyChords.log.count == 3 }
+  emit(0xe9, 0)  // releasing a key must not post again
+  try? await Task.sleep(for: .milliseconds(20))
+  #expect(keyChords.log == ["tap:a", "tap:b", "tap:return"])
+  await runtime.stop()
 }
 
 @MainActor
@@ -293,5 +433,20 @@ private final class MemoryAudioSink: AudioSink, @unchecked Sendable {
   func push(_ samples: [Float]) -> Int {
     self.samples.append(contentsOf: samples)
     return samples.count
+  }
+}
+
+private final class FakeKeyChordPoster: KeyChordPosting, @unchecked Sendable {
+  var log: [String] = []
+  var succeed = true
+
+  func postChord(_ chord: KeyChord) -> Bool {
+    log.append("tap:\(chord.text)")
+    return succeed
+  }
+
+  func holdChord(_ chord: KeyChord, down: Bool) -> Bool {
+    log.append(down ? "down:\(chord.text)" : "up:\(chord.text)")
+    return succeed
   }
 }

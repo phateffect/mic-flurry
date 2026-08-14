@@ -27,6 +27,9 @@ public final class DaemonRuntime {
   private let bluetooth: any BluetoothTransport
   private let hidClient: HIDHelperClient?
   private let audioSinkFactory: AudioSinkFactory
+  private let keyChords: any KeyChordPosting
+  private var keyboardOutputSequence: UInt64 = 0
+  private var heldDictationChord: KeyChord?
   private var audioSink: any AudioSink
   private var session = ATVVSession()
   private var resampler: LinearResampler
@@ -48,13 +51,15 @@ public final class DaemonRuntime {
         deviceUID: settings.injectionDeviceUID,
         sampleRate: settings.outputRateHz
       )
-    }
+    },
+    keyChords: any KeyChordPosting = CGEventKeyChordPoster()
   ) throws {
     store = try Store(path: databaseURL)
     settings = try store.settings()
     self.bluetooth = bluetooth
     self.hidClient = hidClient
     self.audioSinkFactory = audioSinkFactory
+    self.keyChords = keyChords
     let stream = AsyncStream.makeStream(of: Event.self, bufferingPolicy: .bufferingNewest(256))
     events = stream.stream
     eventContinuation = stream.continuation
@@ -200,6 +205,7 @@ public final class DaemonRuntime {
     }
     status.audio.active = false
     status.audio.streamID = nil
+    if session.state.active { postDictationKeys(start: false) }
     session = ATVVSession()
     sessionStartedAt = nil
     if let connected { eventContinuation.yield(.disconnected(connected)) }
@@ -292,6 +298,7 @@ public final class DaemonRuntime {
         for index in status.devices.indices where status.devices[index].id == deviceID {
           status.devices[index].connected = false
         }
+        if session.state.active { postDictationKeys(start: false) }
         session = ATVVSession()
         sessionStartedAt = nil
         eventContinuation.yield(.disconnected(deviceID))
@@ -310,16 +317,60 @@ public final class DaemonRuntime {
       case .audioStarted(let rateHz, _):
         sessionStartedAt = clock.now
         resampler.reconfigure(inputRate: rateHz, outputRate: settings.outputRateHz)
+        postDictationKeys(start: true)
         if settings.autoRecord, recording == nil { try startRecording() }
         eventContinuation.yield(.audioStarted(rateHz: rateHz))
       case .audioStopped:
         sessionStartedAt = nil
+        postDictationKeys(start: false)
         if settings.autoRecord, recording != nil { try finishRecording() }
         eventContinuation.yield(.audioStopped)
       case .error(let message):
         reportMessage(message)
       }
     }
+  }
+
+  private func postDictationKeys(start: Bool) {
+    let tapMode = settings.dictationMode == "tap"
+    if start {
+      guard let chord = KeyChord(parsing: settings.dictationStartChord) else { return }
+      if tapMode {
+        postChord(chord, source: .audio, action: .dictationStart)
+      } else {
+        heldDictationChord = chord
+        postChord(chord, source: .audio, action: .dictationStart, hold: true)
+      }
+    } else {
+      if let held = heldDictationChord {
+        heldDictationChord = nil
+        postChord(held, source: .audio, action: .dictationEnd, hold: false)
+      }
+      if let chord = KeyChord(parsing: settings.dictationEndChord) {
+        postChord(chord, source: .audio, action: .dictationEnd)
+      }
+    }
+  }
+
+  private func postChord(
+    _ chord: KeyChord, source: KeyboardSource, action: KeyboardAction, hold: Bool? = nil
+  ) {
+    keyboardOutputSequence += 1
+    let succeeded: Bool
+    switch hold {
+    case .some(true): succeeded = keyChords.holdChord(chord, down: true)
+    case .some(false): succeeded = keyChords.holdChord(chord, down: false)
+    case .none: succeeded = keyChords.postChord(chord)
+    }
+    eventContinuation.yield(
+      .keyboardOutput(
+        KeyboardOutput(
+          sequence: keyboardOutputSequence,
+          source: source,
+          action: action,
+          succeeded: succeeded,
+          error: succeeded ? nil : "CGEvent post failed; grant Accessibility to MicFlurry"
+        )))
   }
 
   private func handleHIDEvent(_ event: HIDHelperConnectionEvent) {
@@ -356,6 +407,12 @@ public final class DaemonRuntime {
         status.hid.recentInputs.removeFirst(status.hid.recentInputs.count - 64)
       }
       eventContinuation.yield(.hidInput(input))
+      if input.pressed, let action = input.mappedAction,
+        let chordText = settings.actionChords[action.rawValue],
+        let chord = KeyChord(parsing: chordText)
+      {
+        postChord(chord, source: .hid, action: action)
+      }
     case .stopped(let reason):
       status.hid.active = false
       status.hid.mode = .monitor
@@ -409,6 +466,7 @@ public final class DaemonRuntime {
       status.deviceInfo = nil
       status.audio.active = false
       status.audio.streamID = nil
+      if session.state.active { postDictationKeys(start: false) }
       session = ATVVSession()
       sessionStartedAt = nil
       for index in status.devices.indices {
@@ -511,6 +569,16 @@ extension DaemonRuntime: ControlService {
     if let value = change.inputGainDB { candidate.inputGainDB = value }
     if let value = change.recordingDirectory { candidate.recordingDirectory = value }
     if let value = change.autoRecord { candidate.autoRecord = value }
+    if let value = change.dictationStartChord {
+      candidate.dictationStartChord = value.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+    if let value = change.dictationEndChord {
+      candidate.dictationEndChord = value.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+    if let value = change.dictationMode {
+      candidate.dictationMode = value.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+    if let value = change.actionChords { candidate.actionChords = value }
 
     let audioConfigurationChanged =
       candidate.injectionDeviceUID != settings.injectionDeviceUID
