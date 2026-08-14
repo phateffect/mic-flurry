@@ -22,6 +22,39 @@ import Testing
   #expect(settings.autoRecord)
 }
 
+@Test func persistsKeyChordSettingsWithDefaults() throws {
+  let fixture = try DatabaseFixture()
+  defer { fixture.remove() }
+  let store = try Store(path: fixture.databaseURL)
+  let defaults = try store.settings()
+  #expect(defaults.dictationStartChord == "fn")
+  #expect(defaults.dictationEndChord.isEmpty)
+  #expect(defaults.dictationMode == "hold")
+  #expect(defaults.actionChords.isEmpty)
+
+  try store.updateSettings(
+    SettingsChange(
+      dictationStartChord: "ctrl+ctrl", dictationMode: "tap",
+      actionChords: ["select": "return", "volume_up": "a"])
+  )
+  let reopened = try Store(path: fixture.databaseURL)
+  let settings = try reopened.settings()
+  #expect(settings.dictationStartChord == "ctrl+ctrl")
+  #expect(settings.dictationEndChord.isEmpty)
+  #expect(settings.dictationMode == "tap")
+  #expect(settings.actionChords == ["select": "return", "volume_up": "a"])
+
+  #expect(throws: SettingsValidationError.invalidKeyChord("not-a-key")) {
+    try store.updateSettings(SettingsChange(actionChords: ["volume_up": "not-a-key"]))
+  }
+  #expect(throws: SettingsValidationError.invalidChordAction("power")) {
+    try store.updateSettings(SettingsChange(actionChords: ["power": "a"]))
+  }
+  #expect(throws: SettingsValidationError.invalidDictationMode("toggle")) {
+    try store.updateSettings(SettingsChange(dictationMode: "toggle"))
+  }
+}
+
 @Test func migratesLegacyKnownDevicesWithoutTrustingThem() throws {
   let fixture = try DatabaseFixture()
   defer { fixture.remove() }

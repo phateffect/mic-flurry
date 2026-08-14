@@ -75,6 +75,10 @@ let package = Package(
         "MicFlurryControl",
         "MicFlurryHIDClient",
         "MicFlurryStorage",
+      ],
+      linkerSettings: [
+        .linkedFramework("ApplicationServices"),
+        .linkedFramework("CoreGraphics"),
       ]
     ),
     .executableTarget(
