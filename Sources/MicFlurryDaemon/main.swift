@@ -14,6 +14,8 @@ enum MicFlurryDaemonMain {
       let bluetooth = BluetoothAdapter()
       let runtime = try DaemonRuntime(
         databaseURL: databaseURL,
+        keymapDirectory: FileManager.default.homeDirectoryForCurrentUser
+          .appendingPathComponent(".config/micflurry", isDirectory: true),
         bluetooth: bluetooth,
         hidClient: try hidClient()
       )

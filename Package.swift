@@ -11,6 +11,7 @@ let package = Package(
     .library(name: "MicFlurryAudio", targets: ["MicFlurryAudio"]),
     .library(name: "MicFlurryBluetooth", targets: ["MicFlurryBluetooth"]),
     .library(name: "MicFlurryStorage", targets: ["MicFlurryStorage"]),
+    .library(name: "MicFlurryKeymap", targets: ["MicFlurryKeymap"]),
     .library(name: "MicFlurryControl", targets: ["MicFlurryControl"]),
     .library(name: "MicFlurryHIDProtocol", targets: ["MicFlurryHIDProtocol"]),
     .library(name: "MicFlurryHIDHelperCore", targets: ["MicFlurryHIDHelperCore"]),
@@ -44,6 +45,7 @@ let package = Package(
       dependencies: ["MicFlurryDomain"],
       linkerSettings: [.linkedLibrary("sqlite3")]
     ),
+    .target(name: "MicFlurryKeymap", dependencies: ["MicFlurryDomain"]),
     .target(
       name: "MicFlurryControl",
       dependencies: ["MicFlurryDomain"]
@@ -74,6 +76,7 @@ let package = Package(
         "MicFlurryBluetooth",
         "MicFlurryControl",
         "MicFlurryHIDClient",
+        "MicFlurryKeymap",
         "MicFlurryStorage",
       ],
       linkerSettings: [
@@ -102,6 +105,7 @@ let package = Package(
     .testTarget(name: "MicFlurryATVVTests", dependencies: ["MicFlurryATVV"]),
     .testTarget(name: "MicFlurryAudioTests", dependencies: ["MicFlurryAudio"]),
     .testTarget(name: "MicFlurryStorageTests", dependencies: ["MicFlurryStorage"]),
+    .testTarget(name: "MicFlurryKeymapTests", dependencies: ["MicFlurryKeymap"]),
     .testTarget(
       name: "MicFlurryDaemonCoreTests",
       dependencies: ["MicFlurryDaemonCore"]

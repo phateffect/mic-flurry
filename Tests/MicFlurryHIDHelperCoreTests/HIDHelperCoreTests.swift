@@ -4,13 +4,16 @@ import Testing
 
 @testable import MicFlurryHIDHelperCore
 
-@Test func bundledCatalogAllowsOnlyTheRegisteredRC003Profile() throws {
+@Test func bundledCatalogAllowsOnlyRegisteredXiaomiRemoteProfiles() throws {
   let catalog = try TrustedHIDDeviceCatalog.bundled()
+  let rc001 = try catalog.validatedProfile(id: "rc001-v1")
+  #expect(rc001.product == nil)
   let profile = try catalog.validatedProfile(id: "rc003-v1")
   #expect(profile.manufacturer == "MIOM")
   #expect(profile.vendorID == 0x2717)
   #expect(profile.productID == 0x32b8)
   #expect(profile.capturePolicy == .allInterfacesAllInputs)
+  #expect(catalog.profiles.count == 2)
   #expect(throws: HIDCatalogError.unknownProfile("arbitrary")) {
     try catalog.validatedProfile(id: "arbitrary")
   }

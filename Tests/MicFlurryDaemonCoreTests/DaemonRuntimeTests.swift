@@ -6,6 +6,7 @@ import MicFlurryControl
 import MicFlurryDomain
 import MicFlurryHIDClient
 import MicFlurryHIDProtocol
+import MicFlurryKeymap
 import Testing
 
 @testable import MicFlurryDaemonCore
@@ -169,15 +170,22 @@ import Testing
   let helperTransport = FakeHIDTransport()
   let helperClient = HIDHelperClient(transport: helperTransport)
   let keyChords = FakeKeyChordPoster()
+  try KeymapFileStore(directory: directory.appendingPathComponent("keymaps")).write(
+    KeymapConfiguration(
+      model: "mi-rc003",
+      bindings: [
+        .volumeUp: KeymapBinding(click: .chords([KeyChord(parsing: "a")!])),
+        .volumeDown: KeymapBinding(click: .chords([KeyChord(parsing: "b")!])),
+        .select: KeymapBinding(click: .chords([KeyChord(parsing: "return")!])),
+      ]
+    )
+  )
   let runtime = try DaemonRuntime(
     databaseURL: directory.appendingPathComponent("state.db"),
     bluetooth: bluetooth,
     hidClient: helperClient,
     audioSinkFactory: { _ in MemoryAudioSink() },
     keyChords: keyChords
-  )
-  _ = try runtime.controlSetSettings(
-    SettingsChange(actionChords: ["volume_up": "a", "volume_down": "b", "select": "return"])
   )
   runtime.start()
   try await runtime.refreshDevices()
@@ -198,14 +206,114 @@ import Testing
     )
   }
   emit(0xe9, 1)
+  emit(0xe9, 0)
   await waitUntil { keyChords.log.count == 1 }
   emit(0xea, 1)
+  emit(0xea, 0)
   await waitUntil { keyChords.log.count == 2 }
   emit(0x41, 1)
+  emit(0x41, 0)
   await waitUntil { keyChords.log.count == 3 }
-  emit(0xe9, 0)  // releasing a key must not post again
+  emit(0xe9, 0)  // an unmatched release must not post again
   try? await Task.sleep(for: .milliseconds(20))
   #expect(keyChords.log == ["tap:a", "tap:b", "tap:return"])
+  await runtime.stop()
+}
+
+@MainActor
+@Test func rc001UsesStructuredFingerprintAndDedicatedHIDProfile() async throws {
+  let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+  defer { try? FileManager.default.removeItem(at: directory) }
+  let bluetooth = FakeBluetooth(modelNumber: "RC001")
+  let helperTransport = FakeHIDTransport()
+  let runtime = try DaemonRuntime(
+    databaseURL: directory.appendingPathComponent("state.db"),
+    bluetooth: bluetooth,
+    hidClient: HIDHelperClient(transport: helperTransport),
+    audioSinkFactory: { _ in MemoryAudioSink() }
+  )
+
+  try await runtime.refreshDevices()
+  try await runtime.connect(to: FakeBluetooth.deviceID)
+  try await runtime.startHIDCapture()
+
+  #expect(runtime.status.devices.first?.support.model == "mi-rc001")
+  #expect(helperTransport.requests.map(\.profileID) == ["rc001-v1"])
+  await runtime.stop()
+}
+
+@MainActor
+@Test func keymapRecognizesDoubleClickHoldNoopAndSerializedChordSequences() async throws {
+  let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+  defer { try? FileManager.default.removeItem(at: directory) }
+  let keymapDirectory = directory.appendingPathComponent("keymaps")
+  try KeymapFileStore(directory: keymapDirectory).write(
+    KeymapConfiguration(
+      model: "mi-rc003",
+      options: KeymapOptions(
+        doubleClickMilliseconds: 100,
+        holdMilliseconds: 250,
+        sequenceIntervalMilliseconds: 10
+      ),
+      bindings: [
+        .select: KeymapBinding(
+          click: .noop,
+          doubleClick: .chords([
+            KeyChord(parsing: "cmd+b")!, KeyChord(parsing: "p")!, KeyChord(parsing: "1")!,
+          ]),
+          hold: .chords([KeyChord(parsing: "cmd+x")!])
+        )
+      ]
+    )
+  )
+  let bluetooth = FakeBluetooth()
+  let helperTransport = FakeHIDTransport()
+  let keyChords = FakeKeyChordPoster()
+  let runtime = try DaemonRuntime(
+    databaseURL: directory.appendingPathComponent("state.db"),
+    keymapDirectory: keymapDirectory,
+    bluetooth: bluetooth,
+    hidClient: HIDHelperClient(transport: helperTransport),
+    audioSinkFactory: { _ in MemoryAudioSink() },
+    keyChords: keyChords
+  )
+  runtime.start()
+  try await runtime.refreshDevices()
+  try await runtime.connect(to: FakeBluetooth.deviceID)
+  try await runtime.startHIDCapture()
+
+  func select(_ pressed: Bool) {
+    helperTransport.emit(
+      .capture(
+        HIDCaptureEvent(
+          sequence: 1,
+          monotonicNanoseconds: 0,
+          physicalDeviceID: FakeBluetooth.deviceID.rawValue,
+          interfaceIndex: 0,
+          kind: .value(usagePage: 0x0c, usage: 0x41, value: pressed ? 1 : 0)
+        )
+      )
+    )
+  }
+
+  select(true)
+  select(false)
+  try? await Task.sleep(for: .milliseconds(20))
+  select(true)
+  select(false)
+  await waitUntil { keyChords.log.count == 3 }
+  #expect(keyChords.log == ["tap:command+b", "tap:p", "tap:1"])
+
+  select(true)
+  try? await Task.sleep(for: .milliseconds(300))
+  select(false)
+  await waitUntil { keyChords.log.count == 4 }
+  #expect(keyChords.log.last == "tap:command+x")
+
+  select(true)
+  select(false)
+  try? await Task.sleep(for: .milliseconds(130))
+  #expect(keyChords.log.count == 4)
   await runtime.stop()
 }
 
@@ -241,6 +349,61 @@ import Testing
   )
   #expect(restored.settings.inputGainDB == 6)
   #expect(restored.settings.outputRateHz == 16_000)
+  #expect(throws: DaemonRuntimeError.keymapManagedByConfigurationFile) {
+    try runtime.controlSetSettings(SettingsChange(actionChords: ["select": "return"]))
+  }
+}
+
+@MainActor
+@Test func reloadKeymapAtomicallyReplacesTheAttachedModelMapping() async throws {
+  let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+  defer { try? FileManager.default.removeItem(at: directory) }
+  let keymapDirectory = directory.appendingPathComponent("keymaps")
+  let keymapStore = KeymapFileStore(directory: keymapDirectory)
+  try keymapStore.write(
+    KeymapConfiguration(
+      model: "mi-rc003",
+      bindings: [.volumeUp: KeymapBinding(click: .chords([KeyChord(parsing: "a")!]))]
+    )
+  )
+  let helperTransport = FakeHIDTransport()
+  let keyChords = FakeKeyChordPoster()
+  let runtime = try DaemonRuntime(
+    databaseURL: directory.appendingPathComponent("state.db"),
+    keymapDirectory: keymapDirectory,
+    bluetooth: FakeBluetooth(),
+    hidClient: HIDHelperClient(transport: helperTransport),
+    audioSinkFactory: { _ in MemoryAudioSink() },
+    keyChords: keyChords
+  )
+  runtime.start()
+  try await runtime.refreshDevices()
+  try await runtime.connect(to: FakeBluetooth.deviceID)
+  try await runtime.startHIDCapture()
+
+  try keymapStore.write(
+    KeymapConfiguration(
+      model: "mi-rc003",
+      bindings: [.volumeUp: KeymapBinding(click: .chords([KeyChord(parsing: "b")!]))]
+    )
+  )
+  try runtime.reloadKeymap()
+  for value: Int64 in [1, 0] {
+    helperTransport.emit(
+      .capture(
+        HIDCaptureEvent(
+          sequence: 1,
+          monotonicNanoseconds: 0,
+          physicalDeviceID: FakeBluetooth.deviceID.rawValue,
+          interfaceIndex: 0,
+          kind: .value(usagePage: 0x0c, usage: 0xe9, value: value)
+        )
+      )
+    )
+  }
+  await waitUntil { keyChords.log.count == 1 }
+  #expect(keyChords.log == ["tap:b"])
+  await runtime.stop()
 }
 
 @MainActor
@@ -280,6 +443,37 @@ import Testing
   await waitUntil { !runtime.status.hid.active }
   #expect(runtime.status.connectedDevice == FakeBluetooth.deviceID)
   #expect(!bluetooth.released)
+  await runtime.stop()
+}
+
+@MainActor
+@Test func unexpectedHIDRemovalAutomaticallyReseizesWhileExplicitStopDoesNot() async throws {
+  let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+  defer { try? FileManager.default.removeItem(at: directory) }
+  let bluetooth = FakeBluetooth()
+  let helperTransport = FakeHIDTransport()
+  let runtime = try DaemonRuntime(
+    databaseURL: directory.appendingPathComponent("state.db"),
+    bluetooth: bluetooth,
+    hidClient: HIDHelperClient(transport: helperTransport),
+    audioSinkFactory: { _ in MemoryAudioSink() }
+  )
+  runtime.start()
+  try await runtime.refreshDevices()
+  try await runtime.connect(to: FakeBluetooth.deviceID)
+  try await runtime.startHIDCapture()
+  #expect(helperTransport.requests.count == 1)
+
+  helperTransport.emit(.stopped("device_removed:old-interface"))
+  await waitUntil { !runtime.status.hid.active }
+  await runtime.recoverHIDCaptureIfNeeded()
+  #expect(runtime.status.hid.active)
+  #expect(helperTransport.requests.count == 2)
+
+  try await runtime.stopHIDCapture()
+  await runtime.recoverHIDCaptureIfNeeded()
+  #expect(!runtime.status.hid.active)
+  #expect(helperTransport.requests.count == 2)
   await runtime.stop()
 }
 
@@ -357,8 +551,10 @@ private final class FakeBluetooth: BluetoothTransport {
   var attachCount = 0
   var releaseCount = 0
   var attachmentConnected = false
+  let modelNumber: String
 
-  init() {
+  init(modelNumber: String = "RC003") {
+    self.modelNumber = modelNumber
     let stream = AsyncStream.makeStream(of: BluetoothEvent.self)
     events = stream.stream
     continuation = stream.continuation
@@ -384,6 +580,12 @@ private final class FakeBluetooth: BluetoothTransport {
     commands.append(ATVV.getCapabilities)
     var information = DeviceInfo()
     information.physicalDeviceID = deviceID.rawValue
+    information.hidManufacturer = "MIOM"
+    information.hidVendorID = 0x2717
+    information.hidProductID = 0x32b8
+    information.manufacturerName = "MIOM"
+    information.modelNumber = modelNumber
+    information.hardwareRevision = "V2.0"
     return information
   }
 
@@ -403,6 +605,7 @@ private final class FakeBluetooth: BluetoothTransport {
 private final class FakeHIDTransport: HIDHelperTransport {
   let events: AsyncStream<HIDHelperConnectionEvent>
   private let continuation: AsyncStream<HIDHelperConnectionEvent>.Continuation
+  var requests: [HIDCaptureRequest] = []
 
   init() {
     let stream = AsyncStream.makeStream(of: HIDHelperConnectionEvent.self)
@@ -412,7 +615,7 @@ private final class FakeHIDTransport: HIDHelperTransport {
 
   func emit(_ event: HIDHelperConnectionEvent) { continuation.yield(event) }
   func connect() async throws -> HIDHandshake { HIDHandshake(helperBuild: "test") }
-  func startCapture(_ request: HIDCaptureRequest) async throws {}
+  func startCapture(_ request: HIDCaptureRequest) async throws { requests.append(request) }
   func heartbeat() async throws {}
   func stopCapture() async throws {}
   func invalidate() {}

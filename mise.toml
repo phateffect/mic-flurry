@@ -58,6 +58,15 @@ run = "./scripts/check-swift-app.sh"
 description = "Build and validate the ad-hoc private service app"
 run = "./scripts/build-private-swift-app.sh ${MICFLURRY_VERSION:-0.3.0} ${MICFLURRY_BUILD_NUMBER:-1}"
 
+[tasks.swift-private-install]
+description = "Build, stage, validate, and install the private service app"
+depends = ["swift-private-app"]
+run = "./scripts/install-built-private-services.sh"
+
+[tasks.swift-private-reload]
+description = "Reload the already staged private service app after TCC changes"
+run = "./scripts/reload-built-private-services.sh"
+
 [tasks.swift-private-test]
 description = "Test private identifier and CDHash mutual authentication"
 run = "./scripts/swift-package.sh private-test"
@@ -84,6 +93,22 @@ run = "cargo clippy --workspace --all-targets -- -D warnings"
 [tasks.demo-ui-check]
 description = "Check the optional Rust TUI demo client"
 depends = ["demo-ui-fmt", "demo-ui-test", "demo-ui-clippy"]
+
+[tasks.ctl]
+description = "Send JSON-RPC commands to the running micflurryd control socket"
+run = "./scripts/micflurryctl.py"
+
+[tasks.keymap-input-check]
+description = "Wait 15 seconds for remote input, then print compact daemon status"
+run = "./scripts/check-keymap-input-after-delay.sh"
+
+[tasks.keymap-install]
+description = "Atomically install a per-model TOML keymap in ~/.config/micflurry"
+run = "./scripts/install-keymap-config.sh"
+
+[tasks.friend-dist]
+description = "Build the all-in-one friend distribution zip (driver plus services)"
+run = "./scripts/build-friend-distribution.sh ${MICFLURRY_VERSION:-0.3.0}"
 
 [tasks.micflurry]
 description = "Run the Rust TUI as a client of the Swift daemon"
