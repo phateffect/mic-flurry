@@ -123,6 +123,10 @@ public enum KeyboardAction: String, Codable, CaseIterable, Sendable {
   case volumeDown = "volume_down"
   case volumeUp = "volume_up"
   case mute
+  case power
+  case microphone
+  case menu
+  case tv
   case dictationStart = "dictation_start"
   case dictationEnd = "dictation_end"
 }
@@ -393,6 +397,10 @@ public enum HIDUsageMapping {
     case (0x07, 0x7f), (0x0c, 0xe2): .mute
     case (0x07, 0x80), (0x0c, 0xe9): .volumeUp
     case (0x07, 0x81), (0x0c, 0xea): .volumeDown
+    case (0x07, 0x35): .tv
+    case (0x07, 0x3e): .microphone
+    case (0x07, 0x65): .menu
+    case (0x07, 0x66): .power
     default: nil
     }
   }

@@ -1,5 +1,6 @@
 import Foundation
 import IOKit.hid
+import MicFlurryDomain
 
 public struct HIDIdentity: Equatable, Sendable {
   public var manufacturer: String?
@@ -40,10 +41,18 @@ public enum HIDIdentityProvider {
     return result
   }
 
-  public static func isSupportedRC003(_ identity: HIDIdentity?) -> Bool {
-    identity?.manufacturer == "MIOM"
-      && identity?.vendorID == 0x2717
-      && identity?.productID == 0x32b8
+  public static func isSupportedXiaomiRemote(_ identity: HIDIdentity?) -> Bool {
+    guard
+      let manufacturer = identity?.manufacturer,
+      let vendorID = identity?.vendorID,
+      let productID = identity?.productID
+    else { return false }
+    return RemoteCatalog.contains(
+      hid: RemoteHIDFingerprint(
+        manufacturer: manufacturer,
+        vendorID: vendorID,
+        productID: productID
+      ))
   }
 
   private static func stringProperty(_ device: IOHIDDevice, key: String) -> String? {

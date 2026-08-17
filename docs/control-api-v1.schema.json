@@ -32,7 +32,8 @@
             "v1.start_recording",
             "v1.stop_recording",
             "v1.start_hid_capture",
-            "v1.stop_hid_capture"
+            "v1.stop_hid_capture",
+            "v1.reload_keymap"
           ]
         },
         "params": {}

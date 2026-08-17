@@ -47,8 +47,8 @@ import Testing
   #expect(throws: SettingsValidationError.invalidKeyChord("not-a-key")) {
     try store.updateSettings(SettingsChange(actionChords: ["volume_up": "not-a-key"]))
   }
-  #expect(throws: SettingsValidationError.invalidChordAction("power")) {
-    try store.updateSettings(SettingsChange(actionChords: ["power": "a"]))
+  #expect(throws: SettingsValidationError.invalidChordAction("not_real")) {
+    try store.updateSettings(SettingsChange(actionChords: ["not_real": "a"]))
   }
   #expect(throws: SettingsValidationError.invalidDictationMode("toggle")) {
     try store.updateSettings(SettingsChange(dictationMode: "toggle"))

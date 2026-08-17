@@ -182,6 +182,17 @@ async fn event_loop(
                         let result = if app.status.hid.active { client.stop_hid_capture().await } else { client.start_hid_capture().await };
                         if let Err(error) = result { app.message = error.to_string(); }
                     }
+                    KeyCode::Char('c') => {
+                        if app.quality_check.is_some() {
+                            app.quality_check = None;
+                            app.message = "Quality check cancelled".into();
+                        } else if app.start_quality_check()
+                            && !app.status.hid.active
+                            && let Err(error) = client.start_hid_capture().await
+                        {
+                            app.message = format!("Quality check: {error}");
+                        }
+                    }
                     KeyCode::Char('<' | ',') => adjust_gain(&client, &mut app, -1.0).await,
                     KeyCode::Char('>' | '.') => adjust_gain(&client, &mut app, 1.0).await,
                     _ => {}
@@ -215,6 +226,7 @@ struct App {
     selected: usize,
     message: String,
     input_gain_db: f32,
+    quality_check: Option<QualityCheck>,
 }
 
 impl App {
@@ -225,6 +237,9 @@ impl App {
                 // recent_outputs is accumulated locally from keyboard_output events;
                 // the daemon's status broadcast does not carry it, so keep ours.
                 status.hid.recent_outputs = std::mem::take(&mut self.status.hid.recent_outputs);
+                if let Some(check) = &mut self.quality_check {
+                    check.observe_status(&status);
+                }
                 self.status = status;
             }
             Event::Attaching { active, .. } => self.status.attaching = active,
@@ -232,10 +247,29 @@ impl App {
             Event::RecordingStarted { path } => self.message = format!("Recording {path}"),
             Event::RecordingStopped { path, .. } => self.message = format!("Saved {path}"),
             Event::HidInput { input } => {
+                if let Some(check) = &mut self.quality_check {
+                    check.observe_input(&input);
+                }
                 push_recent(&mut self.status.hid.recent_inputs, input, 12);
             }
             Event::KeyboardOutput { output } => {
+                if let Some(check) = &mut self.quality_check {
+                    check.observe_output(&output);
+                }
                 push_recent(&mut self.status.hid.recent_outputs, output, 12);
+            }
+            Event::AudioStarted { .. } => {
+                if let Some(check) = &mut self.quality_check {
+                    check.audio = AudioObservation::Started;
+                    check.decoded_frames = 0;
+                }
+            }
+            Event::AudioStopped => {
+                if let Some(check) = &mut self.quality_check
+                    && check.audio == AudioObservation::Started
+                {
+                    check.audio = AudioObservation::Complete;
+                }
             }
             _ => {}
         }
@@ -252,16 +286,148 @@ impl App {
             self.selected += 1;
         }
     }
+
+    fn start_quality_check(&mut self) -> bool {
+        let Some(connected) = self.status.connected_device.as_ref() else {
+            self.message = "Quality check requires an attached remote".into();
+            return false;
+        };
+        let Some(model) = self
+            .status
+            .devices
+            .iter()
+            .find(|device| &device.id == connected)
+            .and_then(|device| device.support.model())
+        else {
+            self.message = "Quality check requires a supported remote model".into();
+            return false;
+        };
+        self.quality_check = Some(QualityCheck::new(model));
+        self.message = "Quality check started: press every remote key once".into();
+        true
+    }
+}
+
+const QUALITY_ACTIONS: [KeyboardAction; 13] = [
+    KeyboardAction::Power,
+    KeyboardAction::Microphone,
+    KeyboardAction::Up,
+    KeyboardAction::Down,
+    KeyboardAction::Left,
+    KeyboardAction::Right,
+    KeyboardAction::Select,
+    KeyboardAction::Back,
+    KeyboardAction::Home,
+    KeyboardAction::Menu,
+    KeyboardAction::VolumeDown,
+    KeyboardAction::VolumeUp,
+    KeyboardAction::Tv,
+];
+
+#[derive(Clone, Copy, Default)]
+struct KeyObservation {
+    pressed: bool,
+    released: bool,
+}
+
+#[derive(Clone, Copy, Default, Eq, PartialEq)]
+enum AudioObservation {
+    #[default]
+    Waiting,
+    Started,
+    Complete,
+}
+
+struct QualityCheck {
+    model: String,
+    keys: [(KeyboardAction, KeyObservation); QUALITY_ACTIONS.len()],
+    audio: AudioObservation,
+    decoded_frames: u64,
+    cgevent_succeeded: u64,
+    cgevent_failed: u64,
+}
+
+impl QualityCheck {
+    fn new(model: &str) -> Self {
+        Self {
+            model: model.into(),
+            keys: QUALITY_ACTIONS.map(|action| (action, KeyObservation::default())),
+            audio: AudioObservation::Waiting,
+            decoded_frames: 0,
+            cgevent_succeeded: 0,
+            cgevent_failed: 0,
+        }
+    }
+
+    fn observe_status(&mut self, status: &Status) {
+        if self.audio != AudioObservation::Waiting {
+            self.decoded_frames = self.decoded_frames.max(status.audio.decoded_frames);
+        }
+    }
+
+    fn observe_input(&mut self, input: &control::HidInput) {
+        let Some(action) = input.mapped_action else {
+            return;
+        };
+        let Some((_, observation)) = self.keys.iter_mut().find(|(item, _)| *item == action) else {
+            return;
+        };
+        if input.pressed {
+            observation.pressed = true;
+        } else if observation.pressed {
+            observation.released = true;
+        }
+    }
+
+    fn observe_output(&mut self, output: &control::KeyboardOutput) {
+        if output.source != KeyboardSource::Hid {
+            return;
+        }
+        if output.succeeded {
+            self.cgevent_succeeded += 1;
+        } else {
+            self.cgevent_failed += 1;
+        }
+    }
+
+    fn completed_keys(&self) -> usize {
+        self.keys
+            .iter()
+            .filter(|(_, state)| state.pressed && state.released)
+            .count()
+    }
+
+    fn key_complete(&self, action: KeyboardAction) -> bool {
+        self.keys
+            .iter()
+            .find(|(item, _)| *item == action)
+            .is_some_and(|(_, state)| state.pressed && state.released)
+    }
+
+    fn audio_complete(&self) -> bool {
+        self.audio == AudioObservation::Complete && self.decoded_frames > 0
+    }
+
+    fn complete(&self, status: &Status) -> bool {
+        self.completed_keys() == self.keys.len()
+            && status.connected_device.is_some()
+            && status.device_info.is_some()
+            && status.hid.active
+            && self.audio_complete()
+            && self.cgevent_succeeded > 0
+            && self.cgevent_failed == 0
+    }
 }
 
 #[allow(clippy::too_many_lines)]
 fn draw(frame: &mut ratatui::Frame<'_>, app: &mut App) {
+    let diagnostics_height = if app.quality_check.is_some() { 9 } else { 7 };
     let rows = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(3),
             Constraint::Min(8),
-            Constraint::Length(7),
+            Constraint::Length(diagnostics_height),
             Constraint::Length(3),
             Constraint::Length(3),
         ])
@@ -389,35 +555,48 @@ fn draw(frame: &mut ratatui::Frame<'_>, app: &mut App) {
         columns[1],
     );
 
-    let diagnostics = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Percentage(34),
-            Constraint::Percentage(33),
-            Constraint::Percentage(33),
-        ])
-        .split(rows[2]);
-    frame.render_widget(
-        Paragraph::new(format_device_info(app.status.device_info.as_ref())).block(
-            Block::default()
-                .title(" Device info ")
-                .borders(Borders::ALL),
-        ),
-        diagnostics[0],
-    );
-    frame.render_widget(
-        Paragraph::new(format_hid_status(&app.status.hid))
-            .block(Block::default().title(" HID input ").borders(Borders::ALL)),
-        diagnostics[1],
-    );
-    frame.render_widget(
-        Paragraph::new(format_cgevent_outputs(&app.status.hid)).block(
-            Block::default()
-                .title(" CGEvent output ")
-                .borders(Borders::ALL),
-        ),
-        diagnostics[2],
-    );
+    if let Some(check) = &app.quality_check {
+        let title = if check.complete(&app.status) {
+            " Quality check · PASS "
+        } else {
+            " Quality check · press every key once "
+        };
+        frame.render_widget(
+            Paragraph::new(format_quality_check(check, &app.status))
+                .block(Block::default().title(title).borders(Borders::ALL)),
+            rows[2],
+        );
+    } else {
+        let diagnostics = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([
+                Constraint::Percentage(34),
+                Constraint::Percentage(33),
+                Constraint::Percentage(33),
+            ])
+            .split(rows[2]);
+        frame.render_widget(
+            Paragraph::new(format_device_info(app.status.device_info.as_ref())).block(
+                Block::default()
+                    .title(" Device info ")
+                    .borders(Borders::ALL),
+            ),
+            diagnostics[0],
+        );
+        frame.render_widget(
+            Paragraph::new(format_hid_status(&app.status.hid))
+                .block(Block::default().title(" HID input ").borders(Borders::ALL)),
+            diagnostics[1],
+        );
+        frame.render_widget(
+            Paragraph::new(format_cgevent_outputs(&app.status.hid)).block(
+                Block::default()
+                    .title(" CGEvent output ")
+                    .borders(Borders::ALL),
+            ),
+            diagnostics[2],
+        );
+    }
 
     let error = app.status.last_error.as_deref().unwrap_or("none");
     frame.render_widget(
@@ -427,7 +606,7 @@ fn draw(frame: &mut ratatui::Frame<'_>, app: &mut App) {
         rows[3],
     );
 
-    frame.render_widget(Paragraph::new(" q quit · s refresh macOS · ↑/↓ select · enter attach · d release · r record · h HID · </> gain ")
+    frame.render_widget(Paragraph::new(" q quit · s refresh · ↑/↓ select · enter attach · d release · r record · h HID · c check · </> gain ")
         .style(Style::default().fg(Color::DarkGray)).block(Block::default().borders(Borders::ALL)), rows[4]);
 }
 
@@ -546,6 +725,70 @@ fn format_cgevent_outputs(hid: &HidStatus) -> String {
         .join("\n")
 }
 
+fn format_quality_check(check: &QualityCheck, status: &Status) -> String {
+    let permission = |ready: bool| if ready { "PASS" } else { "WAIT" };
+    let input_monitoring = if status.hid.active {
+        "PASS"
+    } else if status.hid.last_error.is_some() {
+        "FAIL"
+    } else {
+        "WAIT"
+    };
+    let accessibility = if check.cgevent_failed > 0 {
+        "FAIL"
+    } else if check.cgevent_succeeded > 0 {
+        "PASS"
+    } else {
+        "WAIT"
+    };
+    let key = |action| {
+        format!(
+            "{} {}",
+            if check.key_complete(action) {
+                "✓"
+            } else {
+                "·"
+            },
+            keyboard_action_label(action)
+        )
+    };
+    format!(
+        "Model {} · keys {}/{} · HID {}\nPermissions: Bluetooth {} · Input Monitoring {} · Accessibility {}\n{}   {}\n{}   {}   {}   {}   {}\n{}   {}   {}\n{}   {}   {}\nATVV microphone: {} · PCM +{} frames · CGEvent sent/failed {}/{}",
+        check.model,
+        check.completed_keys(),
+        check.keys.len(),
+        if status.hid.active {
+            "seize"
+        } else {
+            "monitor"
+        },
+        permission(status.connected_device.is_some() && status.device_info.is_some()),
+        input_monitoring,
+        accessibility,
+        key(KeyboardAction::Power),
+        key(KeyboardAction::Microphone),
+        key(KeyboardAction::Up),
+        key(KeyboardAction::Down),
+        key(KeyboardAction::Left),
+        key(KeyboardAction::Right),
+        key(KeyboardAction::Select),
+        key(KeyboardAction::Back),
+        key(KeyboardAction::Home),
+        key(KeyboardAction::Menu),
+        key(KeyboardAction::VolumeDown),
+        key(KeyboardAction::VolumeUp),
+        key(KeyboardAction::Tv),
+        if check.audio_complete() {
+            "PASS"
+        } else {
+            "WAIT"
+        },
+        check.decoded_frames,
+        check.cgevent_succeeded,
+        check.cgevent_failed,
+    )
+}
+
 fn keyboard_source_label(source: KeyboardSource) -> &'static str {
     match source {
         KeyboardSource::Tui => "tui",
@@ -569,6 +812,10 @@ fn keyboard_action_label(action: KeyboardAction) -> &'static str {
         KeyboardAction::VolumeDown => "volume_down",
         KeyboardAction::VolumeUp => "volume_up",
         KeyboardAction::Mute => "mute",
+        KeyboardAction::Power => "power",
+        KeyboardAction::Microphone => "microphone",
+        KeyboardAction::Menu => "menu",
+        KeyboardAction::Tv => "tv",
         KeyboardAction::DictationStart => "dictation_start fn+ctrl",
         KeyboardAction::DictationEnd => "dictation_end fn",
     }
@@ -594,5 +841,58 @@ mod tests {
         assert_eq!(format_duration(0), "00:00.0");
         assert_eq!(format_duration(60_080), "01:00.0");
         assert_eq!(format_duration(125_987), "02:05.9");
+    }
+
+    #[test]
+    fn quality_check_requires_complete_keys_audio_and_permissions() {
+        let mut check = QualityCheck::new("mi-rc001");
+        for action in QUALITY_ACTIONS {
+            check.observe_input(&control::HidInput {
+                sequence: 1,
+                usage_page: 7,
+                usage: 1,
+                usage_name: "test".into(),
+                value: 1,
+                pressed: true,
+                mapped_action: Some(action),
+            });
+            check.observe_input(&control::HidInput {
+                sequence: 2,
+                usage_page: 7,
+                usage: 1,
+                usage_name: "test".into(),
+                value: 0,
+                pressed: false,
+                mapped_action: Some(action),
+            });
+        }
+        check.audio = AudioObservation::Complete;
+        check.decoded_frames = 220;
+        check.observe_output(&control::KeyboardOutput {
+            sequence: 1,
+            source: KeyboardSource::Hid,
+            action: KeyboardAction::Select,
+            succeeded: true,
+            error: None,
+        });
+        let status = Status {
+            connected_device: Some(control::DeviceId("remote".into())),
+            device_info: Some(DeviceInfo::default()),
+            hid: HidStatus {
+                active: true,
+                ..HidStatus::default()
+            },
+            ..Status::default()
+        };
+        assert!(check.complete(&status));
+
+        check.observe_output(&control::KeyboardOutput {
+            sequence: 2,
+            source: KeyboardSource::Hid,
+            action: KeyboardAction::Select,
+            succeeded: false,
+            error: Some("Accessibility denied".into()),
+        });
+        assert!(!check.complete(&status));
     }
 }

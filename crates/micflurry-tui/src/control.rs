@@ -281,6 +281,10 @@ pub enum KeyboardAction {
     VolumeDown,
     VolumeUp,
     Mute,
+    Power,
+    Microphone,
+    Menu,
+    Tv,
     DictationStart,
     DictationEnd,
 }
@@ -520,7 +524,7 @@ struct WireNotification {
 
 #[cfg(test)]
 mod tests {
-    use super::{DeviceSupport, Event};
+    use super::{DeviceSupport, Event, KeyboardAction};
 
     #[test]
     fn decodes_swift_device_support_shapes() {
@@ -547,5 +551,18 @@ mod tests {
         )
         .unwrap();
         assert!(matches!(event, Event::Status { .. }));
+    }
+
+    #[test]
+    fn decodes_all_xiaomi_remote_actions() {
+        for (name, expected) in [
+            ("power", KeyboardAction::Power),
+            ("microphone", KeyboardAction::Microphone),
+            ("menu", KeyboardAction::Menu),
+            ("tv", KeyboardAction::Tv),
+        ] {
+            let action: KeyboardAction = serde_json::from_str(&format!("\"{name}\"")).unwrap();
+            assert_eq!(action, expected);
+        }
     }
 }

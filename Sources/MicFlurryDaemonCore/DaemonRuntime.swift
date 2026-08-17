@@ -6,6 +6,7 @@ import MicFlurryControl
 import MicFlurryDomain
 import MicFlurryHIDClient
 import MicFlurryHIDProtocol
+import MicFlurryKeymap
 import MicFlurryStorage
 
 public typealias AudioSinkFactory = @MainActor @Sendable (Settings) throws -> any AudioSink
@@ -14,6 +15,9 @@ public enum DaemonRuntimeError: Error, Equatable, Sendable {
   case cannotReconfigureAudioWhileRecording
   case hidHelperUnavailable
   case noConnectedPhysicalDevice
+  case unsupportedRemoteFingerprint
+  case keymapUnavailable
+  case keymapManagedByConfigurationFile
 }
 
 @MainActor
@@ -24,12 +28,18 @@ public final class DaemonRuntime {
 
   private let eventContinuation: AsyncStream<Event>.Continuation
   private let store: Store
+  private let keymapStore: KeymapFileStore
+  private let legacyActionChords: [String: String]
   private let bluetooth: any BluetoothTransport
   private let hidClient: HIDHelperClient?
   private let audioSinkFactory: AudioSinkFactory
   private let keyChords: any KeyChordPosting
   private var keyboardOutputSequence: UInt64 = 0
   private var heldDictationChord: KeyChord?
+  private var keymapConfiguration: KeymapConfiguration?
+  private var keymapStates: [KeyboardAction: KeymapGestureState] = [:]
+  private var keymapOutputTask: Task<Void, Never>?
+  private var keymapGeneration: UInt64 = 0
   private var audioSink: any AudioSink
   private var session = ATVVSession()
   private var resampler: LinearResampler
@@ -39,11 +49,13 @@ public final class DaemonRuntime {
   private var maintenanceTask: Task<Void, Never>?
   private var hidEventTask: Task<Void, Never>?
   private var autoReconnectEnabled = true
+  private var hidCaptureDesired = false
   private var maintenanceTicks: UInt64 = 0
   private let clock = ContinuousClock()
 
   public init(
     databaseURL: URL,
+    keymapDirectory: URL? = nil,
     bluetooth: any BluetoothTransport,
     hidClient: HIDHelperClient? = nil,
     audioSinkFactory: @escaping AudioSinkFactory = { settings in
@@ -55,7 +67,14 @@ public final class DaemonRuntime {
     keyChords: any KeyChordPosting = CGEventKeyChordPoster()
   ) throws {
     store = try Store(path: databaseURL)
-    settings = try store.settings()
+    keymapStore = KeymapFileStore(
+      directory: keymapDirectory
+        ?? databaseURL.deletingLastPathComponent().appendingPathComponent("keymaps")
+    )
+    var loadedSettings = try store.settings()
+    legacyActionChords = loadedSettings.actionChords
+    loadedSettings.actionChords = [:]
+    settings = loadedSettings
     self.bluetooth = bluetooth
     self.hidClient = hidClient
     self.audioSinkFactory = audioSinkFactory
@@ -145,18 +164,36 @@ public final class DaemonRuntime {
 
   public func connect(to deviceID: DeviceID) async throws {
     if status.connectedDevice == deviceID, status.deviceInfo != nil { return }
-    guard let device = status.devices.first(where: { $0.id == deviceID }),
+    guard var device = status.devices.first(where: { $0.id == deviceID }),
       device.support.model != nil
     else { throw BluetoothAdapterError.unsupportedDevice(deviceID) }
     autoReconnectEnabled = true
     status.attaching = true
     publishStatus()
     do {
+      var keymapError: String?
       let info = try await bluetooth.attach(to: deviceID)
+      guard let remoteProfile = RemoteCatalog.profile(deviceInfo: info) else {
+        try? await bluetooth.release()
+        throw DaemonRuntimeError.unsupportedRemoteFingerprint
+      }
+      do {
+        keymapConfiguration = try keymapStore.loadOrMigrate(
+          model: remoteProfile.model,
+          legacyActionChords: legacyActionChords
+        )
+      } catch {
+        keymapConfiguration = nil
+        keymapError = "Keymap unavailable: \(error)"
+      }
       status.connectedDevice = deviceID
       status.deviceInfo = info
+      device.support = .supported(model: remoteProfile.model)
+      if let index = status.devices.firstIndex(where: { $0.id == deviceID }) {
+        status.devices[index].support = device.support
+      }
       status.attaching = false
-      status.lastError = nil
+      status.lastError = keymapError
       for index in status.devices.indices {
         status.devices[index].connected = status.devices[index].id == deviceID
       }
@@ -173,6 +210,7 @@ public final class DaemonRuntime {
 
   public func release() async throws {
     autoReconnectEnabled = false
+    hidCaptureDesired = false
     try await releaseBluetoothAndLocalState()
   }
 
@@ -200,6 +238,8 @@ public final class DaemonRuntime {
     let connected = status.connectedDevice
     status.connectedDevice = nil
     status.deviceInfo = nil
+    cancelKeymapActivity()
+    keymapConfiguration = nil
     for index in status.devices.indices {
       status.devices[index].connected = false
     }
@@ -236,14 +276,21 @@ public final class DaemonRuntime {
     guard let physicalDeviceID = status.deviceInfo?.physicalDeviceID else {
       throw DaemonRuntimeError.noConnectedPhysicalDevice
     }
+    guard let remoteProfile = status.deviceInfo.flatMap(RemoteCatalog.profile(deviceInfo:)) else {
+      throw DaemonRuntimeError.unsupportedRemoteFingerprint
+    }
+    guard keymapConfiguration?.model == remoteProfile.model else {
+      throw DaemonRuntimeError.keymapUnavailable
+    }
     do {
       try await hidClient.startCapture(
-        profileID: "rc003-v1",
+        profileID: remoteProfile.hidProfileID,
         physicalDeviceID: physicalDeviceID
       )
       status.hid.mode = .seize
       status.hid.active = true
       status.hid.lastError = nil
+      hidCaptureDesired = true
       publishStatus()
     } catch {
       status.hid.active = false
@@ -255,11 +302,30 @@ public final class DaemonRuntime {
 
   public func stopHIDCapture() async throws {
     guard let hidClient else { throw DaemonRuntimeError.hidHelperUnavailable }
+    hidCaptureDesired = false
     try await hidClient.stopCapture()
+    cancelKeymapActivity()
     status.hid.active = false
     status.hid.mode = .monitor
     status.hid.lastError = nil
     publishStatus()
+  }
+
+  public func reloadKeymap() throws {
+    guard let remoteProfile = status.deviceInfo.flatMap(RemoteCatalog.profile(deviceInfo:)) else {
+      throw DaemonRuntimeError.unsupportedRemoteFingerprint
+    }
+    do {
+      let candidate = try keymapStore.load(model: remoteProfile.model)
+      cancelKeymapActivity()
+      keymapConfiguration = candidate
+      status.lastError = nil
+      publishStatus()
+    } catch {
+      status.lastError = "Keymap reload failed: \(error)"
+      publishStatus()
+      throw error
+    }
   }
 
   func handleBluetoothEvent(_ event: BluetoothEvent) async {
@@ -295,6 +361,8 @@ public final class DaemonRuntime {
         if recording != nil { try finishRecording() }
         status.connectedDevice = nil
         status.deviceInfo = nil
+        cancelKeymapActivity()
+        keymapConfiguration = nil
         for index in status.devices.indices where status.devices[index].id == deviceID {
           status.devices[index].connected = false
         }
@@ -352,9 +420,10 @@ public final class DaemonRuntime {
     }
   }
 
+  @discardableResult
   private func postChord(
     _ chord: KeyChord, source: KeyboardSource, action: KeyboardAction, hold: Bool? = nil
-  ) {
+  ) -> Bool {
     keyboardOutputSequence += 1
     let succeeded: Bool
     switch hold {
@@ -371,6 +440,7 @@ public final class DaemonRuntime {
           succeeded: succeeded,
           error: succeeded ? nil : "CGEvent post failed; grant Accessibility to MicFlurry"
         )))
+    return succeeded
   }
 
   private func handleHIDEvent(_ event: HIDHelperConnectionEvent) {
@@ -407,32 +477,128 @@ public final class DaemonRuntime {
         status.hid.recentInputs.removeFirst(status.hid.recentInputs.count - 64)
       }
       eventContinuation.yield(.hidInput(input))
-      if input.pressed, let action = input.mappedAction,
-        let chordText = settings.actionChords[action.rawValue],
-        let chord = KeyChord(parsing: chordText)
-      {
-        postChord(chord, source: .hid, action: action)
-      }
+      if let action = input.mappedAction { handleKeymap(action: action, pressed: input.pressed) }
     case .stopped(let reason):
+      cancelKeymapActivity()
       status.hid.active = false
       status.hid.mode = .monitor
       status.hid.lastError = reason == "explicit_stop" ? nil : reason
       publishStatus()
     case .interrupted:
+      cancelKeymapActivity()
       status.hid.active = false
       status.hid.lastError = "HID helper interrupted"
       publishStatus()
     case .invalidated:
+      cancelKeymapActivity()
       status.hid.active = false
       status.hid.lastError = "HID helper unavailable"
       publishStatus()
     }
   }
 
+  private func handleKeymap(action: KeyboardAction, pressed: Bool) {
+    guard let configuration = keymapConfiguration,
+      let binding = configuration.bindings[action]
+    else { return }
+    let state = keymapStates[action] ?? KeymapGestureState()
+    keymapStates[action] = state
+    if pressed {
+      guard !state.pressed else { return }
+      state.pressed = true
+      state.holdTriggered = false
+      state.pressGeneration &+= 1
+      let pressGeneration = state.pressGeneration
+      state.holdTask?.cancel()
+      if binding.doubleClick != nil, let pending = state.pendingClickTask {
+        pending.cancel()
+        state.pendingClickTask = nil
+        state.completingDoubleClick = true
+      }
+      if let output = binding.hold {
+        state.holdTask = Task { [weak self, weak state] in
+          try? await Task.sleep(
+            for: .milliseconds(Int(configuration.options.holdMilliseconds))
+          )
+          guard !Task.isCancelled, let self, let state, state.pressed,
+            state.pressGeneration == pressGeneration
+          else { return }
+          state.holdTriggered = true
+          state.pendingClickTask?.cancel()
+          state.pendingClickTask = nil
+          state.completingDoubleClick = false
+          enqueue(output: output, action: action)
+        }
+      }
+      return
+    }
+
+    guard state.pressed else { return }
+    state.pressed = false
+    state.holdTask?.cancel()
+    state.holdTask = nil
+    if state.holdTriggered {
+      state.holdTriggered = false
+      state.completingDoubleClick = false
+      return
+    }
+    guard let doubleClick = binding.doubleClick else {
+      if let click = binding.click { enqueue(output: click, action: action) }
+      return
+    }
+    if state.completingDoubleClick {
+      state.completingDoubleClick = false
+      enqueue(output: doubleClick, action: action)
+    } else {
+      state.pendingClickTask = Task { [weak self, weak state] in
+        try? await Task.sleep(
+          for: .milliseconds(Int(configuration.options.doubleClickMilliseconds))
+        )
+        guard !Task.isCancelled, let self, let state else { return }
+        state.pendingClickTask = nil
+        if let click = binding.click { enqueue(output: click, action: action) }
+      }
+    }
+  }
+
+  private func enqueue(output: KeymapOutput, action: KeyboardAction) {
+    guard case .chords(let chords) = output, !chords.isEmpty,
+      let configuration = keymapConfiguration
+    else { return }
+    let previous = keymapOutputTask
+    let generation = keymapGeneration
+    let interval = configuration.options.sequenceIntervalMilliseconds
+    keymapOutputTask = Task { [weak self] in
+      if let previous { await previous.value }
+      guard let self, generation == keymapGeneration else { return }
+      for (index, chord) in chords.enumerated() {
+        guard generation == keymapGeneration,
+          postChord(chord, source: .hid, action: action)
+        else { return }
+        if index + 1 < chords.count, interval > 0 {
+          try? await Task.sleep(for: .milliseconds(Int(interval)))
+          guard !Task.isCancelled else { return }
+        }
+      }
+    }
+  }
+
+  private func cancelKeymapActivity() {
+    keymapGeneration &+= 1
+    keymapOutputTask?.cancel()
+    keymapOutputTask = nil
+    for state in keymapStates.values {
+      state.holdTask?.cancel()
+      state.pendingClickTask?.cancel()
+    }
+    keymapStates.removeAll()
+  }
+
   private func maintenanceTick() async {
     maintenanceTicks &+= 1
     if maintenanceTicks.isMultiple(of: 20) {
       await recoverBluetoothAttachmentIfNeeded()
+      await recoverHIDCaptureIfNeeded()
     }
     guard let sessionStartedAt else { return }
     let elapsed = sessionStartedAt.duration(to: clock.now)
@@ -495,6 +661,13 @@ public final class DaemonRuntime {
     }
   }
 
+  func recoverHIDCaptureIfNeeded() async {
+    guard hidCaptureDesired, !status.hid.active, status.connectedDevice != nil,
+      status.deviceInfo != nil, keymapConfiguration != nil
+    else { return }
+    try? await startHIDCapture()
+  }
+
   private func synchronizeStatus(publish: Bool = true) {
     let state = session.state
     status.audio.active = state.active
@@ -552,6 +725,16 @@ public final class DaemonRuntime {
   }
 }
 
+@MainActor
+private final class KeymapGestureState {
+  var pressed = false
+  var holdTriggered = false
+  var completingDoubleClick = false
+  var pressGeneration: UInt64 = 0
+  var holdTask: Task<Void, Never>?
+  var pendingClickTask: Task<Void, Never>?
+}
+
 extension DaemonRuntime: ControlService {
   public func controlStatus() -> Status {
     status
@@ -562,6 +745,9 @@ extension DaemonRuntime: ControlService {
   }
 
   public func controlSetSettings(_ change: SettingsChange) throws -> Settings {
+    if change.actionChords != nil {
+      throw DaemonRuntimeError.keymapManagedByConfigurationFile
+    }
     try SettingsValidator.validate(change)
     var candidate = settings
     if let value = change.injectionDeviceUID { candidate.injectionDeviceUID = value }
@@ -578,7 +764,6 @@ extension DaemonRuntime: ControlService {
     if let value = change.dictationMode {
       candidate.dictationMode = value.trimmingCharacters(in: .whitespacesAndNewlines)
     }
-    if let value = change.actionChords { candidate.actionChords = value }
 
     let audioConfigurationChanged =
       candidate.injectionDeviceUID != settings.injectionDeviceUID
@@ -588,6 +773,7 @@ extension DaemonRuntime: ControlService {
     }
     let replacementSink = try audioConfigurationChanged ? audioSinkFactory(candidate) : nil
     settings = try store.updateSettings(change)
+    settings.actionChords = [:]
     if let replacementSink {
       audioSink = replacementSink
       resampler.reconfigure(
@@ -626,5 +812,9 @@ extension DaemonRuntime: ControlService {
 
   public func controlStopHIDCapture() async throws {
     try await stopHIDCapture()
+  }
+
+  public func controlReloadKeymap() throws {
+    try reloadKeymap()
   }
 }

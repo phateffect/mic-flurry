@@ -23,6 +23,7 @@ and clients must ignore values they do not understand.
 | `v1.stop_recording` | none | `null` |
 | `v1.start_hid_capture` | none | `null` |
 | `v1.stop_hid_capture` | none | `null` |
+| `v1.reload_keymap` | none | `null` |
 
 For example:
 
@@ -39,13 +40,21 @@ Settings fields are `injection_device_uid`, `output_rate_hz`, `input_gain_db`,
 `recording_directory`, and `auto_record`. Output rates are limited to 8000, 16000, 44100, and 48000
 Hz, and gain is limited to -24 through +24 dB. Changing the device UID or output rate atomically
 opens the replacement AudioUnit before committing the setting and is rejected during recording.
+The legacy `action_chords` SQLite field is used only for one-time TOML migration. New
+`v1.set_settings` requests containing it are rejected; key mappings live in
+`~/.config/micflurry/<model>.toml`.
 
-`v1.start_hid_capture` always requests the built-in `rc003-v1` profile and the physical device ID
-already correlated during BLE attachment. Public clients cannot provide a VID/PID, match dictionary,
+`v1.start_hid_capture` requests the built-in profile selected from the attached remote's trusted
+structured IOHID + GATT DIS fingerprint and the already correlated physical device ID. Public
+clients cannot provide a profile ID, VID/PID, match dictionary,
 IORegistry path, or arbitrary helper profile. Helper unavailability changes only HID status; it does
 not release Bluetooth, stop audio, or stop recording. The method accepts no parameters (JSON `null`
 is also accepted); a caller-supplied profile, VID/PID, IORegistry path, or other matching override is
 rejected as invalid parameters rather than ignored.
+
+`v1.reload_keymap` parses and validates the attached model's TOML file before atomically replacing
+the active mapping. A failed reload keeps the previous valid mapping. It also cancels pending
+single-click, double-click, hold, and chord-sequence work without emitting additional keys.
 
 ## Events
 

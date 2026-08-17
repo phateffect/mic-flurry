@@ -243,15 +243,25 @@ By default the client connects to
 `~/Library/Application Support/MicFlurry/run/control.sock`; pass `--socket PATH` after
 `mise run micflurry --` to target an isolated daemon. Use `s` to refresh the system-connected device
 list, the arrow keys and Return to attach, `d` to release, `r` to record, `h` to toggle exclusive
-HID capture, `<`/`>` to adjust persisted input gain, and `q` to quit.
+HID capture, `c` to start/cancel the interactive remote quality check, `<`/`>` to adjust persisted
+input gain, and `q` to quit. The quality check requires one complete press/release for every
+model-defined physical key and confirms Bluetooth attachment, actual HID seizure (Input Monitoring),
+successful CGEvent posting (Accessibility), and an ATVV microphone session with decoded PCM.
 
 At startup the Swift daemon asks CoreBluetooth for system-connected peripherals exposing the ATVV service.
 It joins those UUIDs to read-only IOHID identity data and accepts only registered hardware
-fingerprints. The currently verified fingerprint is manufacturer `MIOM`, vendor ID `10007`, product
-ID `12984`; its observed product name is `小米语音遥控器`. The displayed name is not used for
-authorization and may be changed by the user. MicFlurry remembers the last successful UUID only to
+fingerprints. RC001 and RC003 share the IOHID family fingerprint manufacturer `MIOM`, vendor ID
+`10007`, product ID `12984`; after attachment, the registered GATT Device Information fingerprint
+(`manufacturer_name`, `model_number`, and `hardware_revision`) selects the exact model profile.
+Bluetooth advertised names and IOHID product strings are diagnostic display data only and are never
+used for authorization or model selection. MicFlurry remembers the last successful UUID only to
 select among multiple supported devices. It never scans, creates or removes system pairing, and
 releasing or quitting MicFlurry does not disconnect a link macOS already owned.
+
+Per-model click, double-click, hold, and chord-sequence mappings live under
+`~/.config/micflurry/<model>.toml`; see [`docs/keymapping-config.md`](docs/keymapping-config.md).
+The daemon creates a missing file once from the legacy SQLite `action_chords` value and then treats
+TOML as authoritative.
 
 ## License
 

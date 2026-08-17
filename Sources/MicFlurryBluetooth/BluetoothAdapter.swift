@@ -67,14 +67,14 @@ public final class BluetoothAdapter: NSObject {
     let identities = HIDIdentityProvider.identities()
     return connected.map { peripheral in
       let identity = identities[peripheral.identifier]
-      let supported = HIDIdentityProvider.isSupportedRC003(identity)
+      let supported = HIDIdentityProvider.isSupportedXiaomiRemote(identity)
       return Device(
         id: DeviceID(rawValue: peripheral.identifier.uuidString),
         name: peripheral.name ?? identity?.product ?? "Connected ATVV remote",
         known: false,
         connected: true,
         supportsATVV: true,
-        support: supported ? .supported(model: "小米语音遥控器") : .unsupported
+        support: supported ? .supported(model: "RC001/RC003") : .unsupported
       )
     }
   }
@@ -91,7 +91,9 @@ public final class BluetoothAdapter: NSObject {
     guard let identifier = UUID(uuidString: deviceID.rawValue),
       let peripheral = peripherals[identifier]
     else { throw BluetoothAdapterError.peripheralNotConnected(deviceID) }
-    guard HIDIdentityProvider.isSupportedRC003(HIDIdentityProvider.identities()[identifier]) else {
+    guard
+      HIDIdentityProvider.isSupportedXiaomiRemote(HIDIdentityProvider.identities()[identifier])
+    else {
       throw BluetoothAdapterError.unsupportedDevice(deviceID)
     }
 

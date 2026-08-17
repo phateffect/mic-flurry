@@ -71,6 +71,11 @@ history.
   emits a SHA-256 file under `dist`.
 - Release packages install only `/Library/Audio/Plug-Ins/HAL/MicFlurry.driver` and create the package
   receipt `io.phateffect.MicFlurry`.
+- `scripts/build-friend-distribution.sh <version>` (mise task `friend-dist`) builds the all-in-one
+  friend zip: driver plus the ad-hoc private service app, double-click `Install/Uninstall
+  MicFlurry.command` wrappers from `packaging/friend`, a friend-facing README, and the GPL source
+  snapshot. Its installers reuse `private-install-root.sh`/`private-uninstall-root.sh` and add only
+  driver install/removal plus a `coreaudiod` restart, all behind one native administrator prompt.
 - Never commit `.build`, `build`, `dist`, DerivedData, or local macOS metadata.
 
 Before release, run at minimum:
@@ -116,6 +121,22 @@ installer; `sudo killall coreaudiod` is the faster development path.
 - `mise run micflurry -- <arguments>` runs the Rust TUI as a pure socket client of `micflurryd`.
   Pass `--socket PATH` for an isolated test daemon. The TUI must never open SQLite, Bluetooth, or
   CoreAudio directly, and quitting it must not stop daemon-owned work.
+- `mise run ctl -- <command>` (or `scripts/micflurryctl.py` directly) sends JSON-RPC requests to
+  the running daemon's control socket: `status`, `devices`, `refresh`, `connect <uuid>`,
+  `release`, `settings`, and raw `call <method> [params-json]`. Use it instead of ad-hoc
+  socket clients. Hardware details verified on real remotes are recorded in
+  `docs/known-remotes.md`; keep that file current when new hardware is attached.
+- After compiling changes to `micflurryd`, the service host, or the HID helper, complete the
+  post-build workflow: run `mise run check`; run `mise run swift-private-install` to rebuild,
+  validate, stage under `.build/private-service-install`, and install through the native
+  administrator prompt; reconnect or reload the affected feature; then verify it against live
+  hardware. If macOS Input Monitoring must be toggled for a new ad-hoc signature, toggle
+  `/Applications/MicFlurry.app` and run `mise run swift-private-reload` to reinstall the exact
+  staged build before continuing verification.
+- Put repeatable multi-step shell workflows under `scripts/` and expose operator-facing workflows
+  as named tasks in `mise.toml`, so approvals apply to stable, reviewable commands. Use
+  `mise run keymap-input-check` for the fixed 15-second remote-input observation window; do not
+  issue ad-hoc agent commands beginning with `sleep N` or combine sleeps with follow-up commands.
 - Private distribution to a small trusted tester group may use the repository's ad-hoc-signed
   traditional LaunchAgent/LaunchDaemon package instead of `SMAppService`. Its daemon and helper must
   mutually pin the expected identifiers and build-specific CDHashes, install only the documented
@@ -153,7 +174,8 @@ installer; `sudo killall coreaudiod` is the faster development path.
   not depend on TUI, web, or native UI concerns.
 - The remapping path is seizure-only. Do not add an IOHID-plus-CGEvent suppression fallback
   unless the user explicitly changes this decision. Seize every IOHID interface matching the
-  registered RC003 fingerprint and capture every raw report and decoded usage; do not require a
+  registered RC001/RC003 structured fingerprint and capture every raw report and decoded usage; do
+  not use advertised names or IOHID product strings for identity, and do not require a
   per-button usage allowlist at the helper boundary.
 - Additional GATT profiles may be added behind the same runtime/control boundaries after ATVV
   hardware validation; do not couple profile-specific code to the TUI.

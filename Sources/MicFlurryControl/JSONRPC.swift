@@ -255,6 +255,7 @@ public protocol ControlService: AnyObject {
   func controlStopRecording() throws
   func controlStartHIDCapture() async throws
   func controlStopHIDCapture() async throws
+  func controlReloadKeymap() throws
 }
 
 public enum ControlMethods {
@@ -268,6 +269,7 @@ public enum ControlMethods {
   public static let stopRecording = "v1.stop_recording"
   public static let startHIDCapture = "v1.start_hid_capture"
   public static let stopHIDCapture = "v1.stop_hid_capture"
+  public static let reloadKeymap = "v1.reload_keymap"
   public static let event = "v1.event"
 }
 
@@ -321,6 +323,10 @@ public enum ControlRouter {
       case ControlMethods.stopHIDCapture:
         try requireNoParameters(request.params)
         try await service.controlStopHIDCapture()
+        result = .null
+      case ControlMethods.reloadKeymap:
+        try requireNoParameters(request.params)
+        try service.controlReloadKeymap()
         result = .null
       default:
         return JSONRPCResponse(

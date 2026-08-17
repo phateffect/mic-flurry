@@ -71,6 +71,28 @@ import Testing
   #expect(service.hidStartCount == 1)
 }
 
+@MainActor
+@Test func routesKeymapReloadWithoutCallerOverrides() async throws {
+  let service = FakeControlService()
+  let accepted = await ControlRouter.route(
+    JSONRPCRequest(id: .integer(6), method: ControlMethods.reloadKeymap),
+    to: service
+  )
+  #expect(accepted?.error == nil)
+  #expect(service.keymapReloadCount == 1)
+
+  let rejected = await ControlRouter.route(
+    JSONRPCRequest(
+      id: .integer(7),
+      method: ControlMethods.reloadKeymap,
+      params: .object(["path": .string("/tmp/attacker.toml")])
+    ),
+    to: service
+  )
+  #expect(rejected?.error?.code == -32_602)
+  #expect(service.keymapReloadCount == 1)
+}
+
 @Test func codecUsesNewlineDelimitedSnakeCaseFrames() throws {
   let notification = JSONRPCNotification(
     method: ControlMethods.event,
@@ -219,6 +241,7 @@ private final class FakeControlService: ControlService {
   var settings = Settings(recordingDirectory: "/tmp/MicFlurry")
   var connectedDevice: DeviceID?
   var hidStartCount = 0
+  var keymapReloadCount = 0
 
   init() {
     let stream = AsyncStream.makeStream(of: Event.self)
@@ -243,4 +266,5 @@ private final class FakeControlService: ControlService {
   func controlStopRecording() throws {}
   func controlStartHIDCapture() async throws { hidStartCount += 1 }
   func controlStopHIDCapture() async throws {}
+  func controlReloadKeymap() throws { keymapReloadCount += 1 }
 }

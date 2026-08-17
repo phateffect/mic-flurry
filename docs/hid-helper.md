@@ -5,9 +5,10 @@ interface belonging to a trusted physical device and forward bounded raw reports
 to the active user's daemon. It does not own Bluetooth, audio, SQLite, mappings, or CGEvent output.
 
 The helper embeds `device-profiles.json`; XPC clients can request only a profile ID and an optional
-physical device ID selected from enumeration. The first profile is `rc003-v1` (`MIOM`,
-`0x2717:0x32b8`). Arbitrary match dictionaries, VID/PID values, IORegistry paths, and report policies
-are not part of the protocol.
+physical device ID selected from enumeration. Registered profiles include `rc001-v1` and
+`rc003-v1` for the trusted `MIOM`, `0x2717:0x32b8` family. The user-editable mapping design never
+adds trusted devices or helper profiles. Arbitrary match dictionaries, VID/PID values, IORegistry
+paths, and report policies are not part of the protocol.
 
 Capture is serialized under a single connection-owned lease. All matching interfaces open with
 `kIOHIDOptionsTypeSeizeDevice` before callbacks are accepted. Any failure unregisters callbacks and
@@ -66,6 +67,10 @@ present, and the tester confirmed that macOS volume control worked after wake. W
 either service, a fresh capture then seized the re-enumerated interface and suppressed the volume
 action again. Explicit stop returned the daemon to inactive/monitor with no error, and the tester
 confirmed that volume control immediately returned, completing the post-wake reseizure cycle.
+The daemon now retains successful capture intent across an unexpected `device_removed`, helper
+interruption, or invalidation and retries seizure every two seconds once the attached remote,
+trusted profile, and keymap are available. Explicit `stop_hid_capture` and `release` clear that
+intent and remain in monitor mode.
 Finally, a 60-second full-button pass observed every previously catalogued non-empty keyboard report:
 `0x35`, `0x3e`, `0x4a`, `0x4f`, `0x50`, `0x51`, `0x52`, `0x65`, `0x66`, `0x80`, `0x81`, `0xf1`,
 and OK/Enter `0x28`. Every pressed report was followed by the empty release report, the missing set
